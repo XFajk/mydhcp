@@ -32,10 +32,7 @@ impl DhcpPacket {
         packet.chaddr[0..6]
             .copy_from_slice(&mac_address_by_name("wlp2s0").unwrap().unwrap().bytes());
         packet.dhcp_area[0..4].copy_from_slice(&0x63825363_u32.to_be_bytes());
-        packet.dhcp_area[4] = 0x35_u8.to_be();
-        packet.dhcp_area[5] = 0x01_u8.to_be();
-        packet.dhcp_area[6] = 0x01_u8.to_be();
-        packet.dhcp_area[7] = 0xFF;
+        packet.dhcp_area[4..8].copy_from_slice(&0x350101FF_u32.to_be_bytes());
 
         packet
     }
