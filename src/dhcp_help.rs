@@ -1,7 +1,7 @@
 use mac_address::mac_address_by_name;
 
 #[repr(C, packed)]
-struct DhcpPacket {
+pub struct DhcpPayload {
     op: u8,
     htype: u8,
     hlen: u8,
@@ -19,8 +19,8 @@ struct DhcpPacket {
     dhcp_area: [u8; 64], // vendor area
 }
 
-impl DhcpPacket {
-    fn discover() -> Self {
+impl DhcpPayload {
+    pub fn discover(interface_name: &str) -> Self {
         let mut packet = Self {
             op: 1_u8.to_be(),
             htype: 1_u8.to_be(),
@@ -30,7 +30,7 @@ impl DhcpPacket {
         };
 
         packet.chaddr[0..6]
-            .copy_from_slice(&mac_address_by_name("wlp2s0").unwrap().unwrap().bytes());
+            .copy_from_slice(&mac_address_by_name(interface_name).unwrap().unwrap().bytes());
         packet.dhcp_area[0..4].copy_from_slice(&0x63825363_u32.to_be_bytes());
         packet.dhcp_area[4..8].copy_from_slice(&0x350101FF_u32.to_be_bytes());
 
@@ -38,7 +38,7 @@ impl DhcpPacket {
     }
 }
 
-impl Default for DhcpPacket {
+impl Default for DhcpPayload {
     fn default() -> Self {
         Self {
             op: 0,
@@ -58,4 +58,9 @@ impl Default for DhcpPacket {
             dhcp_area: [0; 64],
         }
     }
+}
+
+
+pub unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
+    unsafe { std::slice::from_raw_parts((p as *const T) as *const u8, ::core::mem::size_of::<T>()) }
 }
