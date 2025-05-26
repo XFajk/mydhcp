@@ -1,7 +1,7 @@
 use mac_address::mac_address_by_name;
 
 #[repr(C, packed)]
-pub struct DhcpPacket {
+struct DhcpPacket {
     op: u8,
     htype: u8,
     hlen: u8,
@@ -20,7 +20,7 @@ pub struct DhcpPacket {
 }
 
 impl DhcpPacket {
-    pub fn discover() -> Self {
+    fn discover() -> Self {
         let mut packet = Self {
             op: 1_u8.to_be(),
             htype: 1_u8.to_be(),
