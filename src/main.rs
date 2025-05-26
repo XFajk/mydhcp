@@ -2,7 +2,7 @@ mod dhcp_help;
 mod socket_help;
 
 use dhcp_help::*;
-use etherparse::{PacketBuilder, SlicedPacket};
+use etherparse::{PacketBuilder, SlicedPacket, TransportSlice};
 use mac_address::mac_address_by_name;
 use std::env::args;
 
@@ -28,18 +28,55 @@ fn main() {
     .ipv4([0u8, 0u8, 0u8, 0u8], [0xffu8, 0xffu8, 0xffu8, 0xffu8], 10)
     .udp(68, 67);
 
-    let dhcp_payload = DhcpPayload::discover(interface_name);
+    let dhcp_transaction_id = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u32
+        ^ std::process::id();
+    let dhcp_payload = DhcpPayload::discover(interface_name, dhcp_transaction_id);
     let raw_payload = unsafe { any_as_u8_slice(&dhcp_payload) };
 
-    let mut raw_packet= Vec::<u8>::with_capacity(packet_builder.size(raw_payload.len()));
+    let mut raw_packet = Vec::<u8>::with_capacity(packet_builder.size(raw_payload.len()));
 
     packet_builder.write(&mut raw_packet, &raw_payload).unwrap();
 
-    dhcp_socket.send_to(&raw_packet, &[0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8]).unwrap();
+    dhcp_socket
+        .send_to(
+            &raw_packet,
+            &[0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8],
+        )
+        .unwrap();
 
     loop {
-        println!("**PACKET**");
         let data = dhcp_socket.recv_from().unwrap();
-        println!("{:x?}", data);
     }
+}
+
+fn get_dhcp_response(
+    socket: &RawSocket,
+    transaction_id: u32,
+    time_out: std::time::Duration,
+) -> std::io::Result<Vec<u8>> {
+    let elapsed_time = std::time::Instant::now();
+    loop {
+        if elapsed_time.elapsed() > time_out {
+            break;
+        }
+        let (data, _) = socket.recv_from()?;
+        match SlicedPacket::from_ethernet(&data) {
+            Ok(parsed) => {
+                if let Some(TransportSlice::Udp(upd_slice)) = parsed.transport {
+                    let dhcp_payload = upd_slice.payload();
+                } 
+            }
+            Err(err) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::Other,
+                    err.to_string(),
+                ));
+            }
+        }
+    }
+
+    todo!();
 }

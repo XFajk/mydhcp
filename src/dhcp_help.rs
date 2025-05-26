@@ -6,7 +6,7 @@ pub struct DhcpPayload {
     htype: u8,
     hlen: u8,
     hops: u8,
-    xid: u32,
+    pub xid: u32,
     secs: u16,
     flags: u16,
     ciaddr: u32, // client address
@@ -16,21 +16,27 @@ pub struct DhcpPayload {
     chaddr: [u8; 16],
     sname: [u8; 64],
     file: [u8; 128],
-    dhcp_area: [u8; 64], // vendor area
+    magic_cookie: u32,
+    pub dhcp_area: Vec<u8>, // vendor area
 }
 
 impl DhcpPayload {
-    pub fn discover(interface_name: &str) -> Self {
+    pub fn discover(interface_name: &str, transaction_id: u32) -> Self {
         let mut packet = Self {
             op: 1_u8.to_be(),
             htype: 1_u8.to_be(),
             hlen: 6_u8.to_be(),
-            xid: 0x4312FFFF_u32.to_be(),
+            xid: transaction_id,
+
             ..Default::default()
         };
 
-        packet.chaddr[0..6]
-            .copy_from_slice(&mac_address_by_name(interface_name).unwrap().unwrap().bytes());
+        packet.chaddr[0..6].copy_from_slice(
+            &mac_address_by_name(interface_name)
+                .unwrap()
+                .unwrap()
+                .bytes(),
+        );
         packet.dhcp_area[0..4].copy_from_slice(&0x63825363_u32.to_be_bytes());
         packet.dhcp_area[4..8].copy_from_slice(&0x350101FF_u32.to_be_bytes());
 
@@ -55,11 +61,11 @@ impl Default for DhcpPayload {
             chaddr: [0; 16],
             sname: [0; 64],
             file: [0; 128],
-            dhcp_area: [0; 64],
+            magic_cookie: 0x63825363_u32.to_be(),
+            dhcp_area: &str],
         }
     }
 }
-
 
 pub unsafe fn any_as_u8_slice<T: Sized>(p: &T) -> &[u8] {
     unsafe { std::slice::from_raw_parts((p as *const T) as *const u8, ::core::mem::size_of::<T>()) }
