@@ -4,7 +4,7 @@ mod socket_help;
 use dhcp_help::*;
 use etherparse::{PacketBuilder, SlicedPacket, TransportSlice};
 use mac_address::mac_address_by_name;
-use std::env::args;
+use std::{env::args, rc::Rc};
 
 use socket_help::RawSocket;
 
@@ -34,7 +34,7 @@ fn main() {
         .as_millis() as u32
         ^ std::process::id();
     let dhcp_payload = DhcpPayload::discover(interface_name, dhcp_transaction_id);
-    let raw_payload = unsafe { any_as_u8_slice(&dhcp_payload) };
+    let raw_payload = dhcp_payload.to_bytes();
 
     let mut raw_packet = Vec::<u8>::with_capacity(packet_builder.size(raw_payload.len()));
 
@@ -47,36 +47,63 @@ fn main() {
         )
         .unwrap();
 
-    loop {
-        let data = dhcp_socket.recv_from().unwrap();
-    }
+    let response = get_dhcp_response(
+        &dhcp_socket,
+        dhcp_transaction_id,
+        std::time::Duration::from_secs(10),
+    )
+    .expect("Failed to capture DHCP Response");
+
+    let response = match SlicedPacket::from_ethernet(&response) {
+        Ok(sliced) => unsafe { DhcpPayload::from_sliced_packet(sliced) },
+        Err(err) => panic!("Failed to parse ethernet packet: {}", err),
+    }; 
 }
 
 fn get_dhcp_response(
     socket: &RawSocket,
     transaction_id: u32,
     time_out: std::time::Duration,
-) -> std::io::Result<Vec<u8>> {
+) -> std::io::Result<Rc<[u8]>> {
+    let is_desired_packet = |packet: SlicedPacket| -> bool {
+        let dhcp_payload: Option<DhcpPayload> = match packet.transport {
+            Some(TransportSlice::Udp(upd_slice)) => unsafe {
+                DhcpPayload::from_bytes(upd_slice.payload())
+            },
+            _ => return false,
+        };
+
+        let dhcp_payload = match dhcp_payload {
+            Some(value) => value,
+            None => return false,
+        };
+
+        if dhcp_payload.xid != transaction_id {
+            return false;
+        }
+
+        true
+    };
+
     let elapsed_time = std::time::Instant::now();
+
     loop {
         if elapsed_time.elapsed() > time_out {
-            break;
+            break Err(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                "The time for capturing a response from a DHCP Server has ran out",
+            ));
         }
         let (data, _) = socket.recv_from()?;
+        let data = Rc::from(data);
+
         match SlicedPacket::from_ethernet(&data) {
             Ok(parsed) => {
-                if let Some(TransportSlice::Udp(upd_slice)) = parsed.transport {
-                    let dhcp_payload = upd_slice.payload();
-                } 
+                if is_desired_packet(parsed) {
+                    break Ok(Rc::clone(&data));
+                }
             }
-            Err(err) => {
-                return Err(std::io::Error::new(
-                    std::io::ErrorKind::Other,
-                    err.to_string(),
-                ));
-            }
+            Err(err) => return Err(std::io::Error::other(err.to_string())),
         }
     }
-
-    todo!();
 }

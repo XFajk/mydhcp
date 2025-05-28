@@ -1,7 +1,6 @@
 use std::{
     ffi::CString,
     os::{fd::RawFd, raw::c_void},
-    ptr::null_mut,
 };
 
 use libc::{SO_ATTACH_FILTER, SOL_SOCKET};
@@ -88,13 +87,13 @@ impl RawSocket {
 
     pub fn set_filter_command(&self, filter_cmd: &str) -> std::io::Result<()> {
         let capture = Capture::from_device::<&str>(&self.interface)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?
+            .map_err(|e| std::io::Error::other( e.to_string()))?
             .open()
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other( e.to_string()))?;
 
         let mut filter_program = capture
             .compile(filter_cmd, true)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e.to_string()))?;
+            .map_err(|e| std::io::Error::other( e.to_string()))?;
 
         self.set_filter(convert_pcap_bpf_program_to_libc_bpf_instructions(
             &mut filter_program,
