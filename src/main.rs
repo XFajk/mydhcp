@@ -57,7 +57,14 @@ fn main() {
     let response = match SlicedPacket::from_ethernet(&response) {
         Ok(sliced) => unsafe { DhcpPayload::from_sliced_packet(sliced) },
         Err(err) => panic!("Failed to parse ethernet packet: {}", err),
-    }; 
+    }
+    .unwrap();
+
+    let my_ip = response.yiaddr;
+    let dhcp_options = DhcpOption::parse_dhcp_options(&response.dhcp_options).unwrap();
+    println!("My IP address {}", my_ip);
+    println!("DHCP options: {:?}", dhcp_options);
+
 }
 
 fn get_dhcp_response(
