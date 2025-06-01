@@ -1,13 +1,17 @@
 use std::{
     ffi::CString,
-    os::{fd::RawFd, raw::c_void},
+    os::{fd::RawFd, raw::c_void}, rc::Rc,
 };
 
 use libc::{SO_ATTACH_FILTER, SOL_SOCKET};
 use pcap::Capture;
+
+use crate::error;
+
+#[derive(Debug, Clone)]
 pub struct RawSocket {
     fd: RawFd,
-    interface: Box<str>,
+    pub interface: Rc<str>,
     interface_index: u32,
 }
 
@@ -33,7 +37,7 @@ impl RawSocket {
             return Err(std::io::Error::last_os_error());
         }
 
-        let socket_addres = libc::sockaddr_ll {
+        let socket_address = libc::sockaddr_ll {
             sll_family: libc::AF_PACKET as u16,
             sll_protocol: libc::htons(libc::ETH_P_ALL as u16),
             sll_ifindex: interface_index as i32,
@@ -46,7 +50,7 @@ impl RawSocket {
         let binding_result = unsafe {
             libc::bind(
                 fd,
-                &socket_addres as *const libc::sockaddr_ll as *const libc::sockaddr,
+                &socket_address as *const libc::sockaddr_ll as *const libc::sockaddr,
                 std::mem::size_of::<libc::sockaddr_ll>() as u32,
             )
         };
@@ -85,15 +89,12 @@ impl RawSocket {
         }
     }
 
-    pub fn set_filter_command(&self, filter_cmd: &str) -> std::io::Result<()> {
-        let capture = Capture::from_device::<&str>(&self.interface)
-            .map_err(|e| std::io::Error::other( e.to_string()))?
-            .open()
-            .map_err(|e| std::io::Error::other( e.to_string()))?;
+    pub fn set_filter_command(&self, filter_cmd: &str) -> Result<(), error::DhcpClientError> {
+        let capture = Capture::from_device::<&str>(&self.interface)?
+            .open()?;
 
         let mut filter_program = capture
-            .compile(filter_cmd, true)
-            .map_err(|e| std::io::Error::other( e.to_string()))?;
+            .compile(filter_cmd, true)?;
 
         self.set_filter(convert_pcap_bpf_program_to_libc_bpf_instructions(
             &mut filter_program,
