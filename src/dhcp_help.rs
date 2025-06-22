@@ -3,7 +3,7 @@ use mac_address::mac_address_by_name;
 use std::{net::Ipv4Addr, rc::Rc};
 
 #[repr(u8)]
-#[derive(Debug, Copy, Clone)]
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
 pub enum DhcpMessage {
     Discover = 1,
     Offer = 2,
@@ -16,23 +16,24 @@ pub enum DhcpMessage {
     Unsupported = 0,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub enum DhcpOption {
-    SubnetMask(Ipv4Addr),
-    Gateway(Rc<[Ipv4Addr]>),
-    DomainNameServer(Rc<[Ipv4Addr]>),
-    HostName(Rc<str>),
-    DomainName(Rc<str>),
-    BroadcastAddress(Ipv4Addr),
-    IpAddressLeaseTime(u32),
-    DhcpMessageType(DhcpMessage),
-    ServerId(Ipv4Addr),
-    ParameterRequestList(Rc<[u8]>),
-    RenewalTime(u32),
-    RebindingTime(u32),
-    End,
-    Pad,
-    UnsupportedOption(u8, Rc<[u8]>),
+    SubnetMask(Ipv4Addr),                // 1
+    Gateway(Rc<[Ipv4Addr]>),             // 3
+    DomainNameServer(Rc<[Ipv4Addr]>),    // 6
+    HostName(Rc<str>),                   // 12
+    DomainName(Rc<str>),                 // 15
+    BroadcastAddress(Ipv4Addr),          // 28
+    IpAddressRequest(Ipv4Addr),          // 50
+    IpAddressLeaseTime(u32),             // 51
+    DhcpMessageType(DhcpMessage),        // 53
+    ServerId(Ipv4Addr),                  // 54
+    ParameterRequestList(Rc<[u8]>),      // 55
+    RenewalTime(u32),                    // 58
+    RebindingTime(u32),                  // 59
+    End,                                 // 255
+    Pad,                                 // 0
+    UnsupportedOption(u8, Rc<[u8]>),     // any other
 }
 
 impl From<(u8, Vec<u8>)> for DhcpOption {
@@ -63,6 +64,9 @@ impl From<(u8, Vec<u8>)> for DhcpOption {
             15 => Self::DomainName(Rc::from(String::from_utf8_lossy(&data).into_owned())),
             28 if data.len() == 4 => {
                 Self::BroadcastAddress(Ipv4Addr::new(data[0], data[1], data[2], data[3]))
+            }
+            50 if data.len() == 4 => {
+                Self::IpAddressRequest(Ipv4Addr::new(data[0], data[1], data[2], data[3]))
             }
             51 if data.len() == 4 => {
                 let secs = u32::from_be_bytes([data[0], data[1], data[2], data[3]]);
@@ -108,6 +112,7 @@ impl DhcpOption {
         while i < options.len() {
             let option = u8::from_be(*options.get(i)?);
             if option == 0xff {
+                result.push(DhcpOption::End);
                 break;
             }
 
@@ -128,77 +133,82 @@ impl DhcpOption {
         let mut bytes = Vec::new();
         for option in options {
             match option {
-            DhcpOption::Pad => bytes.push(0),
-            DhcpOption::SubnetMask(addr) => {
-                bytes.push(1);
-                bytes.push(4);
-                bytes.extend_from_slice(&addr.octets());
-            }
-            DhcpOption::Gateway(addrs) => {
-                bytes.push(3);
-                bytes.push((addrs.len() * 4) as u8);
-                for addr in addrs.iter() {
-                bytes.extend_from_slice(&addr.octets());
+                DhcpOption::Pad => bytes.push(0),
+                DhcpOption::SubnetMask(addr) => {
+                    bytes.push(1);
+                    bytes.push(4);
+                    bytes.extend_from_slice(&addr.octets());
                 }
-            }
-            DhcpOption::DomainNameServer(addrs) => {
-                bytes.push(6);
-                bytes.push((addrs.len() * 4) as u8);
-                for addr in addrs.iter() {
-                bytes.extend_from_slice(&addr.octets());
+                DhcpOption::Gateway(addrs) => {
+                    bytes.push(3);
+                    bytes.push((addrs.len() * 4) as u8);
+                    for addr in addrs.iter() {
+                        bytes.extend_from_slice(&addr.octets());
+                    }
                 }
-            }
-            DhcpOption::HostName(name) => {
-                bytes.push(12);
-                bytes.push(name.len() as u8);
-                bytes.extend_from_slice(name.as_bytes());
-            }
-            DhcpOption::DomainName(name) => {
-                bytes.push(15);
-                bytes.push(name.len() as u8);
-                bytes.extend_from_slice(name.as_bytes());
-            }
-            DhcpOption::BroadcastAddress(addr) => {
-                bytes.push(28);
-                bytes.push(4);
-                bytes.extend_from_slice(&addr.octets());
-            }
-            DhcpOption::IpAddressLeaseTime(secs) => {
-                bytes.push(51);
-                bytes.push(4);
-                bytes.extend_from_slice(&secs.to_be_bytes());
-            }
-            DhcpOption::DhcpMessageType(msg) => {
-                bytes.push(53);
-                bytes.push(1);
-                bytes.push(*msg as u8);
-            }
-            DhcpOption::ServerId(id) => {
-                bytes.push(54);
-                bytes.push(4);
-                bytes.extend_from_slice(&id.octets());
-            }
-            DhcpOption::ParameterRequestList(list) => {
-                bytes.push(55);
-                bytes.push(list.len() as u8);
-                bytes.extend_from_slice(list);
-            }
-            DhcpOption::RenewalTime(t) => {
-                bytes.push(58);
-                bytes.push(4);
-                bytes.extend_from_slice(&t.to_be_bytes());
-            }
-            DhcpOption::RebindingTime(t) => {
-                bytes.push(59);
-                bytes.push(4);
-                bytes.extend_from_slice(&t.to_be_bytes());
-            }
-            DhcpOption::End => bytes.push(255),
-            DhcpOption::UnsupportedOption(code, data) => {
-                bytes.push(*code);
-                bytes.push(data.len() as u8);
-                bytes.extend_from_slice(data);
-            }
+                DhcpOption::DomainNameServer(addrs) => {
+                    bytes.push(6);
+                    bytes.push((addrs.len() * 4) as u8);
+                    for addr in addrs.iter() {
+                        bytes.extend_from_slice(&addr.octets());
+                    }
+                }
+                DhcpOption::HostName(name) => {
+                    bytes.push(12);
+                    bytes.push(name.len() as u8);
+                    bytes.extend_from_slice(name.as_bytes());
+                }
+                DhcpOption::DomainName(name) => {
+                    bytes.push(15);
+                    bytes.push(name.len() as u8);
+                    bytes.extend_from_slice(name.as_bytes());
+                }
+                DhcpOption::BroadcastAddress(addr) => {
+                    bytes.push(28);
+                    bytes.push(4);
+                    bytes.extend_from_slice(&addr.octets());
+                }
+                DhcpOption::IpAddressRequest(addr) => {
+                    bytes.push(50);
+                    bytes.push(4);
+                    bytes.extend_from_slice(&addr.octets());
+                }
+                DhcpOption::IpAddressLeaseTime(secs) => {
+                    bytes.push(51);
+                    bytes.push(4);
+                    bytes.extend_from_slice(&secs.to_be_bytes());
+                }
+                DhcpOption::DhcpMessageType(msg) => {
+                    bytes.push(53);
+                    bytes.push(1);
+                    bytes.push(*msg as u8);
+                }
+                DhcpOption::ServerId(id) => {
+                    bytes.push(54);
+                    bytes.push(4);
+                    bytes.extend_from_slice(&id.octets());
+                }
+                DhcpOption::ParameterRequestList(list) => {
+                    bytes.push(55);
+                    bytes.push(list.len() as u8);
+                    bytes.extend_from_slice(list);
+                }
+                DhcpOption::RenewalTime(t) => {
+                    bytes.push(58);
+                    bytes.push(4);
+                    bytes.extend_from_slice(&t.to_be_bytes());
+                }
+                DhcpOption::RebindingTime(t) => {
+                    bytes.push(59);
+                    bytes.push(4);
+                    bytes.extend_from_slice(&t.to_be_bytes());
+                }
+                DhcpOption::End => bytes.push(255),
+                DhcpOption::UnsupportedOption(code, data) => {
+                    bytes.push(*code);
+                    bytes.push(data.len() as u8);
+                    bytes.extend_from_slice(data);
+                }
             }
         }
         // Ensure the options end with End (255)
@@ -230,7 +240,11 @@ pub struct DhcpPayload {
 }
 
 impl DhcpPayload {
-    pub fn discover(interface_name: &str, transaction_id: u32) -> Self {
+    pub fn discover(
+        interface_name: &str,
+        transaction_id: u32,
+        requested_ip: Option<Ipv4Addr>,
+    ) -> Self {
         let mut discover_payload = Self {
             op: 1_u8,
             htype: 1_u8,
@@ -247,11 +261,54 @@ impl DhcpPayload {
                 .bytes(),
         );
 
-        discover_payload
-            .dhcp_options
-            .extend_from_slice(&0x350101FF_u32.to_be_bytes());
+        let mut dhcp_options: Vec<DhcpOption> = Vec::new();
+        dhcp_options.push(DhcpOption::DhcpMessageType(DhcpMessage::Discover));
+        if let Some(ip) = requested_ip {
+            dhcp_options.push(DhcpOption::IpAddressRequest(ip));
+        }
+        dhcp_options.push(DhcpOption::End);
 
         discover_payload
+            .dhcp_options
+            .extend_from_slice(&DhcpOption::into_bytes(&dhcp_options));
+
+        discover_payload
+    }
+
+    pub fn request(
+        interface_name: &str,
+        transaction_id: u32,
+        ip: Ipv4Addr,
+        server_ip: Ipv4Addr,
+    ) -> Self {
+        let mut request_payload = Self {
+            op: 1_u8,
+            htype: 1_u8,
+            hlen: 6_u8,
+            xid: transaction_id,
+            siaddr: server_ip,
+
+            ..Default::default()
+        };
+
+        request_payload.chaddr[0..6].copy_from_slice(
+            &mac_address_by_name(interface_name)
+                .unwrap()
+                .unwrap()
+                .bytes(),
+        );
+
+        let mut dhcp_options: Vec<DhcpOption> = Vec::new();
+        dhcp_options.push(DhcpOption::DhcpMessageType(DhcpMessage::Request));
+        dhcp_options.push(DhcpOption::IpAddressRequest(ip));
+        dhcp_options.push(DhcpOption::ServerId(server_ip));
+        dhcp_options.push(DhcpOption::End);
+
+        request_payload
+            .dhcp_options
+            .extend_from_slice(&DhcpOption::into_bytes(&dhcp_options));
+
+        request_payload
     }
 
     pub fn to_bytes(&self) -> Box<[u8]> {

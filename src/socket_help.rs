@@ -6,17 +6,20 @@ use std::{
 use libc::{SO_ATTACH_FILTER, SOL_SOCKET};
 use pcap::Capture;
 
-use crate::error;
+use crate::error::{self, DhcpClientError};
 
 #[derive(Debug, Clone)]
 pub struct RawSocket {
     fd: RawFd,
     pub interface: Rc<str>,
     interface_index: u32,
+    pub interface_mac_address: [u8; 6]
 }
 
 impl RawSocket {
-    pub fn bind(interface_name: &str) -> std::io::Result<Self> {
+    pub fn bind(interface_name: &str) -> Result<Self, DhcpClientError> {
+        use mac_address::mac_address_by_name;
+
         let fd = unsafe {
             libc::socket(
                 libc::AF_PACKET,
@@ -26,15 +29,15 @@ impl RawSocket {
         };
 
         if fd < 0 {
-            return Err(std::io::Error::last_os_error());
+            return Err(std::io::Error::last_os_error().into());
         }
 
         let fd: RawFd = RawFd::from(fd);
 
         let interface_index =
-            unsafe { libc::if_nametoindex(CString::new(interface_name)?.as_ptr()) };
+            unsafe { libc::if_nametoindex(CString::new(interface_name).map_err(|err| std::io::Error::from(err))?.as_ptr()) };
         if interface_index == 0 {
-            return Err(std::io::Error::last_os_error());
+            return Err(std::io::Error::last_os_error().into());
         }
 
         let socket_address = libc::sockaddr_ll {
@@ -56,13 +59,19 @@ impl RawSocket {
         };
 
         if binding_result != 0 {
-            return Err(std::io::Error::last_os_error());
+            return Err(std::io::Error::last_os_error().into());
         }
+
+        let interface: Rc<str> = interface_name.into();
+        let interface_mac_address: [u8; 6] = mac_address_by_name(&interface)?
+                    .ok_or(DhcpClientError::InterfaceMissingMacAddress(Rc::clone(&interface)))? 
+                    .bytes();
 
         Ok(Self {
             fd,
-            interface: interface_name.into(),
+            interface,
             interface_index,
+            interface_mac_address
         })
     }
 

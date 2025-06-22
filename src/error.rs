@@ -10,7 +10,7 @@ pub enum DhcpClientError {
     #[error("Packet Capture Error: {0}")]
     PcapError(#[from] pcap::Error),
     #[error("Packet Parsing Error: {0}")]
-    PacketParsingError(#[from] etherparse::err::packet::SliceError), 
+    PacketParsingError(#[from] etherparse::err::packet::SliceError),
     #[error("Packet Building Error: {0}")]
     PacketBuildingError(#[from] etherparse::err::packet::BuildWriteError),
     #[error("Mac Address Error: {0}")]
@@ -29,4 +29,6 @@ pub enum DhcpClientError {
     DhcpConstructionError,
     #[error("The DHCP client is in incorrect state for this operation")]
     DhcpInvalidState,
+    #[error("The DHCP response sent by the server is missing {0}")]
+    DhcpResponseOptionsMissingComponent(Box<str>),
 }
