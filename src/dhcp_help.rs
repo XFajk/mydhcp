@@ -16,7 +16,7 @@ pub enum DhcpMessage {
     Unsupported = 0,
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DhcpOption {
     SubnetMask(Ipv4Addr),                // 1
     Gateway(Rc<[Ipv4Addr]>),             // 3

@@ -9,18 +9,16 @@ use std::{env::args, net::Ipv4Addr, rc::Rc};
 
 use socket_help::RawSocket;
 
-fn main() -> Result<(), DhcpClientError> {
+fn main() {
     let args: Vec<String> = args().collect();
 
-    let client = DhcpClient::new()
-        .connect(&args).unwrap()
-        .discover().unwrap()
-        .receive_offer().unwrap()
-        .request().unwrap();
+    let client = DhcpClient::establish_dhcp_connection(&args); 
+    match client {
+        Ok(_) => {},
+        Err(e) => panic!("{}", e)
+    }
 
     println!("{:#?}", client);
-
-    Ok(())
 }
 
 #[derive(Debug, Clone)]
@@ -38,10 +36,6 @@ enum DhcpClient {
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
-        mask: Ipv4Addr,
-        dns_servers: Rc<[Ipv4Addr]>,
-        gateways: Rc<[Ipv4Addr]>,
-        lease_time: u32,
         dhcp_options: Rc<[DhcpOption]>,
     },
     Requesting {
@@ -49,15 +43,23 @@ enum DhcpClient {
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
-        mask: Ipv4Addr,
-        dns_servers: Rc<[Ipv4Addr]>,
-        gateways: Rc<[Ipv4Addr]>,
-        lease_time: u32,
         offered_dhcp_options: Rc<[DhcpOption]>,
     },
+    ReceivedAcknowledgment {
+        socket: RawSocket,
+        transaction_id: u32,
+        ip: Ipv4Addr,
+        server_ip: Ipv4Addr,
+        acknowledged_options: Rc<[DhcpOption]>,
+    },
+    Active,
 }
 
 impl DhcpClient {
+    fn establish_dhcp_connection(args: &[String]) -> Result<Self, DhcpClientError> {
+        DhcpClient::new().connect(args)?.discover()?.receive_offer()?.request()
+    }
+
     fn new() -> Self {
         Self::Disconnected
     }
@@ -125,84 +127,74 @@ impl DhcpClient {
                 )?
             };
 
-            let response = match SlicedPacket::from_ethernet(&response) {
-                Ok(sliced) => unsafe { DhcpPayload::from_sliced_packet(sliced) },
-                Err(err) => panic!("Failed to parse ethernet packet: {}", err),
-            }
-            .ok_or(DhcpClientError::DhcpConstructionError)?;
-
             let dhcp_options = DhcpOption::parse_dhcp_options(&response.dhcp_options)
                 .ok_or(DhcpClientError::DhcpOptionParsingError)?;
 
-            let server_ip = *match (*dhcp_options)
+            let server_ip = match (*dhcp_options)
                 .iter()
                 .find(|x| matches!(x, DhcpOption::ServerId(_)))
                 .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
                     "Server IP address".into(),
                 ))? {
-                DhcpOption::ServerId(ip) => ip,
+                DhcpOption::ServerId(ip) => *ip,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
             };
 
-            let mask = *match dhcp_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::SubnetMask(_)))
-                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-                    "Subnet Mask".into(),
-                ))? {
-                DhcpOption::SubnetMask(mask) => mask,
-                _ => panic!(
-                    "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
-                ),
-            };
+            // let mask = match dhcp_options
+            //     .iter()
+            //     .find(|x| matches!(x, DhcpOption::SubnetMask(_)))
+            //     .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
+            //         "Subnet Mask".into(),
+            //     ))? {
+            //     DhcpOption::SubnetMask(mask) => *mask,
+            //     _ => panic!(
+            //         "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
+            //     ),
+            // };
 
-            let dns_servers = match dhcp_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::DomainNameServer(_)))
-                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-                    "Domain Name Server List".into(),
-                ))? {
-                DhcpOption::DomainNameServer(servers) => Rc::clone(servers),
-                _ => panic!(
-                    "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
-                ),
-            };
+            // let dns_servers = match dhcp_options
+            //     .iter()
+            //     .find(|x| matches!(x, DhcpOption::DomainNameServer(_)))
+            //     .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
+            //         "Domain Name Server List".into(),
+            //     ))? {
+            //     DhcpOption::DomainNameServer(servers) => Rc::clone(servers),
+            //     _ => panic!(
+            //         "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
+            //     ),
+            // };
 
-            let gateways = match dhcp_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::Gateway(_)))
-                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-                    "Gateway List".into(),
-                ))? {
-                DhcpOption::Gateway(gates) => Rc::clone(gates),
-                _ => panic!(
-                    "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
-                ),
-            };
+            // let gateways = match dhcp_options
+            //     .iter()
+            //     .find(|x| matches!(x, DhcpOption::Gateway(_)))
+            //     .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
+            //         "Gateway List".into(),
+            //     ))? {
+            //     DhcpOption::Gateway(gates) => Rc::clone(gates),
+            //     _ => panic!(
+            //         "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
+            //     ),
+            // };
 
-            let lease_time = *match dhcp_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::IpAddressLeaseTime(_)))
-                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-                    "IP Address Lease Time".into(),
-                ))? {
-                DhcpOption::IpAddressLeaseTime(t) => t,
-                _ => panic!(
-                    "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
-                ),
-            };
+            // let lease_time = *match dhcp_options
+            //     .iter()
+            //     .find(|x| matches!(x, DhcpOption::IpAddressLeaseTime(_)))
+            //     .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
+            //         "IP Address Lease Time".into(),
+            //     ))? {
+            //     DhcpOption::IpAddressLeaseTime(t) => t,
+            //     _ => panic!(
+            //         "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
+            //     ),
+            // };
 
             Ok(Self::ReceivedOffer {
                 socket,
                 transaction_id,
                 ip: response.yiaddr,
                 server_ip,
-                mask,
-                dns_servers,
-                gateways,
-                lease_time,
                 dhcp_options,
             })
         } else {
@@ -216,10 +208,6 @@ impl DhcpClient {
             transaction_id,
             ip,
             server_ip,
-            mask,
-            dns_servers,
-            gateways,
-            lease_time,
             dhcp_options,
         } = self
         {
@@ -247,44 +235,81 @@ impl DhcpClient {
                 transaction_id,
                 ip,
                 server_ip,
-                mask,
-                dns_servers,
-                gateways,
-                lease_time,
                 offered_dhcp_options: dhcp_options,
             })
         } else {
             Err(DhcpClientError::DhcpInvalidState)
         }
     }
+
+    fn receive_acknowledgement(self) -> Result<Self, DhcpClientError> {
+        if let DhcpClient::Requesting {
+            socket,
+            transaction_id,
+            ip,
+            server_ip,
+            offered_dhcp_options,
+        } = self
+        {
+            let acknowledgement = unsafe {
+                Self::get_dhcp_response(
+                    &socket,
+                    transaction_id,
+                    std::time::Duration::from_secs(10),
+                )?
+            };
+
+            let dhcp_options = DhcpOption::parse_dhcp_options(&acknowledgement.dhcp_options)
+                .ok_or(DhcpClientError::DhcpOptionParsingError)?;
+            
+            let differences = compare_dhcp_options(&dhcp_options, &offered_dhcp_options);
+            for diff in differences {
+                println!("{:?} -> {:?}", diff.0, diff.1);
+            }
+            // TODO add a propt here if the user is ok with these changes
+            
+            let acknowledged_options = combine_dhcp_options(&dhcp_options, &offered_dhcp_options);
+
+            Ok(DhcpClient::ReceivedAcknowledgment {
+                socket,
+                transaction_id,
+                ip,
+                server_ip,
+                acknowledged_options
+            })
+        } else {
+            Err(DhcpClientError::DhcpInvalidState)
+        }
+    } 
 }
 
 impl DhcpClient {
     /// REDO! this code is really bad it is very unsafe it only check
     /// if the packet is UDP and that is it and I think it should do more checks
+    /// also it should probably return more than one packet
     unsafe fn get_dhcp_response(
         socket: &RawSocket,
         transaction_id: u32,
         time_out: std::time::Duration,
-    ) -> Result<Rc<[u8]>, error::DhcpClientError> {
-        let is_desired_packet = |packet: SlicedPacket| -> bool {
+    ) -> Result<DhcpPayload, error::DhcpClientError> {
+        let is_desired_packet = |packet: SlicedPacket| -> Option<DhcpPayload> {
             let dhcp_payload: Option<DhcpPayload> = match packet.transport {
                 Some(TransportSlice::Udp(upd_slice)) => unsafe {
                     DhcpPayload::from_bytes(upd_slice.payload())
                 },
-                _ => return false,
+                _ => return None,
             };
 
             let dhcp_payload = match dhcp_payload {
                 Some(value) => value,
-                None => return false,
+                None => return None,
             };
 
             if dhcp_payload.xid != transaction_id {
-                return false;
+                return None; 
             }
 
-            true
+            Some(dhcp_payload) 
         };
 
         let elapsed_time = std::time::Instant::now();
@@ -295,8 +320,8 @@ impl DhcpClient {
 
             match SlicedPacket::from_ethernet(&data) {
                 Ok(parsed) => {
-                    if is_desired_packet(parsed) {
-                        return Ok(Rc::clone(&data));
+                    if let Some(payload) = is_desired_packet(parsed) {
+                        return Ok(payload);
                     }
                 }
                 Err(err) => return Err(err.into()),
@@ -304,4 +329,44 @@ impl DhcpClient {
         }
         return Err(error::DhcpClientError::TimedOut(time_out));
     }
+}
+
+
+/// This Function checks new options and old options and if something is different in the new options or if there is a completely new option
+/// then we add it to the differences that are returned at the end
+fn compare_dhcp_options<'a>(new_options: &'a[DhcpOption], old_options: &'a[DhcpOption]) -> Box<[(Option<&'a DhcpOption>, &'a DhcpOption)]> {
+    use std::mem::discriminant;
+
+    let mut differences: Vec<(Option<&DhcpOption>, &DhcpOption)> = Vec::new();
+
+    for new_o in new_options {
+        let old_o = old_options.iter().find(|o| discriminant(*o) == discriminant(new_o));
+        match old_o {
+            Some(old_o) => {
+                if new_o != old_o {
+                    differences.push((Some(old_o), new_o));
+                }
+            }
+            None => {
+                differences.push((None, new_o));
+            }
+        }
+    }
+
+    differences.into_boxed_slice()
+}
+
+fn combine_dhcp_options(new_options: &[DhcpOption], old_options: &[DhcpOption]) -> Rc<[DhcpOption]> {
+    use std::mem::discriminant;
+
+    let mut result: Vec<DhcpOption> = Vec::from(new_options);
+
+    for old_o in old_options {
+        let d = discriminant(old_o);
+        if !result.iter().any(|o| discriminant(o) == d) {
+            result.push(old_o.clone());
+        }
+    }
+
+    result.into()
 }
