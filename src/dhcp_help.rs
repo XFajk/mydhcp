@@ -112,7 +112,6 @@ impl DhcpOption {
         while i < options.len() {
             let option = u8::from_be(*options.get(i)?);
             if option == 0xff {
-                result.push(DhcpOption::End);
                 break;
             }
 

@@ -1,3 +1,4 @@
+mod netconfig_help;
 mod dhcp_help;
 mod error;
 mod socket_help;
@@ -12,10 +13,10 @@ use socket_help::RawSocket;
 fn main() {
     let args: Vec<String> = args().collect();
 
-    let client = DhcpClient::establish_dhcp_connection(&args); 
+    let client = DhcpClient::establish_dhcp_connection(&args);
     match client {
-        Ok(_) => {},
-        Err(e) => panic!("{}", e)
+        Ok(_) => {}
+        Err(e) => panic!("{}", e),
     }
 
     println!("{:#?}", client);
@@ -57,7 +58,12 @@ enum DhcpClient {
 
 impl DhcpClient {
     fn establish_dhcp_connection(args: &[String]) -> Result<Self, DhcpClientError> {
-        DhcpClient::new().connect(args)?.discover()?.receive_offer()?.request()
+        DhcpClient::new()
+            .connect(args)?
+            .discover()?
+            .receive_offer()?
+            .request()?
+            .receive_acknowledgement()
     }
 
     fn new() -> Self {
@@ -142,54 +148,6 @@ impl DhcpClient {
                 ),
             };
 
-            // let mask = match dhcp_options
-            //     .iter()
-            //     .find(|x| matches!(x, DhcpOption::SubnetMask(_)))
-            //     .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-            //         "Subnet Mask".into(),
-            //     ))? {
-            //     DhcpOption::SubnetMask(mask) => *mask,
-            //     _ => panic!(
-            //         "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
-            //     ),
-            // };
-
-            // let dns_servers = match dhcp_options
-            //     .iter()
-            //     .find(|x| matches!(x, DhcpOption::DomainNameServer(_)))
-            //     .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-            //         "Domain Name Server List".into(),
-            //     ))? {
-            //     DhcpOption::DomainNameServer(servers) => Rc::clone(servers),
-            //     _ => panic!(
-            //         "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
-            //     ),
-            // };
-
-            // let gateways = match dhcp_options
-            //     .iter()
-            //     .find(|x| matches!(x, DhcpOption::Gateway(_)))
-            //     .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-            //         "Gateway List".into(),
-            //     ))? {
-            //     DhcpOption::Gateway(gates) => Rc::clone(gates),
-            //     _ => panic!(
-            //         "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
-            //     ),
-            // };
-
-            // let lease_time = *match dhcp_options
-            //     .iter()
-            //     .find(|x| matches!(x, DhcpOption::IpAddressLeaseTime(_)))
-            //     .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-            //         "IP Address Lease Time".into(),
-            //     ))? {
-            //     DhcpOption::IpAddressLeaseTime(t) => t,
-            //     _ => panic!(
-            //         "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
-            //     ),
-            // };
-
             Ok(Self::ReceivedOffer {
                 socket,
                 transaction_id,
@@ -261,13 +219,13 @@ impl DhcpClient {
 
             let dhcp_options = DhcpOption::parse_dhcp_options(&acknowledgement.dhcp_options)
                 .ok_or(DhcpClientError::DhcpOptionParsingError)?;
-            
+
             let differences = compare_dhcp_options(&dhcp_options, &offered_dhcp_options);
             for diff in differences {
                 println!("{:?} -> {:?}", diff.0, diff.1);
             }
             // TODO add a propt here if the user is ok with these changes
-            
+
             let acknowledged_options = combine_dhcp_options(&dhcp_options, &offered_dhcp_options);
 
             Ok(DhcpClient::ReceivedAcknowledgment {
@@ -275,12 +233,74 @@ impl DhcpClient {
                 transaction_id,
                 ip,
                 server_ip,
-                acknowledged_options
+                acknowledged_options,
             })
         } else {
             Err(DhcpClientError::DhcpInvalidState)
         }
-    } 
+    }
+    fn activate(self) -> Result<Self, DhcpClientError> {
+        if let DhcpClient::ReceivedAcknowledgment {
+            socket,
+            transaction_id,
+            ip,
+            server_ip,
+            acknowledged_options,
+        } = self
+        {
+            let mask = match acknowledged_options 
+                .iter()
+                .find(|x| matches!(x, DhcpOption::SubnetMask(_)))
+                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
+                    "Subnet Mask".into(),
+                ))? {
+                DhcpOption::SubnetMask(mask) => *mask,
+                _ => panic!(
+                    "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
+                ),
+            };
+
+            let dns_servers = match acknowledged_options
+                .iter()
+                .find(|x| matches!(x, DhcpOption::DomainNameServer(_)))
+                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
+                    "Domain Name Server List".into(),
+                ))? {
+                DhcpOption::DomainNameServer(servers) => Rc::clone(servers),
+                _ => panic!(
+                    "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
+                ),
+            };
+
+            let gateways = match acknowledged_options
+                .iter()
+                .find(|x| matches!(x, DhcpOption::Gateway(_)))
+                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
+                    "Gateway List".into(),
+                ))? {
+                DhcpOption::Gateway(gates) => Rc::clone(gates),
+                _ => panic!(
+                    "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
+                ),
+            };
+
+            let lease_time = *match acknowledged_options
+                .iter()
+                .find(|x| matches!(x, DhcpOption::IpAddressLeaseTime(_)))
+                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
+                    "IP Address Lease Time".into(),
+                ))? {
+                DhcpOption::IpAddressLeaseTime(t) => t,
+                _ => panic!(
+                    "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
+                ),
+            };
+
+            Ok(DhcpClient::Active)
+        } else {
+            Err(DhcpClientError::DhcpInvalidState)
+        }
+    }
 }
 
 impl DhcpClient {
@@ -306,10 +326,10 @@ impl DhcpClient {
             };
 
             if dhcp_payload.xid != transaction_id {
-                return None; 
+                return None;
             }
 
-            Some(dhcp_payload) 
+            Some(dhcp_payload)
         };
 
         let elapsed_time = std::time::Instant::now();
@@ -331,16 +351,20 @@ impl DhcpClient {
     }
 }
 
-
 /// This Function checks new options and old options and if something is different in the new options or if there is a completely new option
 /// then we add it to the differences that are returned at the end
-fn compare_dhcp_options<'a>(new_options: &'a[DhcpOption], old_options: &'a[DhcpOption]) -> Box<[(Option<&'a DhcpOption>, &'a DhcpOption)]> {
+fn compare_dhcp_options<'a>(
+    new_options: &'a [DhcpOption],
+    old_options: &'a [DhcpOption],
+) -> Box<[(Option<&'a DhcpOption>, &'a DhcpOption)]> {
     use std::mem::discriminant;
 
     let mut differences: Vec<(Option<&DhcpOption>, &DhcpOption)> = Vec::new();
 
     for new_o in new_options {
-        let old_o = old_options.iter().find(|o| discriminant(*o) == discriminant(new_o));
+        let old_o = old_options
+            .iter()
+            .find(|o| discriminant(*o) == discriminant(new_o));
         match old_o {
             Some(old_o) => {
                 if new_o != old_o {
@@ -356,7 +380,10 @@ fn compare_dhcp_options<'a>(new_options: &'a[DhcpOption], old_options: &'a[DhcpO
     differences.into_boxed_slice()
 }
 
-fn combine_dhcp_options(new_options: &[DhcpOption], old_options: &[DhcpOption]) -> Rc<[DhcpOption]> {
+fn combine_dhcp_options(
+    new_options: &[DhcpOption],
+    old_options: &[DhcpOption],
+) -> Rc<[DhcpOption]> {
     use std::mem::discriminant;
 
     let mut result: Vec<DhcpOption> = Vec::from(new_options);
@@ -370,3 +397,6 @@ fn combine_dhcp_options(new_options: &[DhcpOption], old_options: &[DhcpOption]) 
 
     result.into()
 }
+
+
+
