@@ -1,5 +1,7 @@
-use libc::{ioctl, AF_INET, AF_NETLINK, IFF_UP};
-use std::{ffi::{c_void, CString}, net::Ipv4Addr, os::fd::RawFd};
+use libc::{AF_INET, AF_NETLINK, IFF_UP, ioctl};
+use std::{
+    ffi::{c_void, CString}, io::Write, mem::{size_of, size_of_val}, net::Ipv4Addr, os::fd::RawFd
+};
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -48,7 +50,7 @@ impl NetConfigManager {
             libc::bind(
                 netlink_socket,
                 &nl_addr as *const libc::sockaddr_nl as *const libc::sockaddr,
-                std::mem::size_of::<libc::sockaddr_nl>() as u32,
+                size_of::<libc::sockaddr_nl>() as u32,
             )
         };
 
@@ -59,8 +61,7 @@ impl NetConfigManager {
             return Err(std::io::Error::last_os_error());
         }
 
-        let control_socket =
-            unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, libc::NETLINK_ROUTE) };
+        let control_socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
 
         if control_socket < 0 {
             unsafe {
@@ -82,8 +83,15 @@ impl NetConfigManager {
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         let name_bytes = interface_name.as_bytes_with_nul();
-        let len = ifr.ifr_name.len().min(name_bytes.len());
-        ifr.ifr_name[..len].copy_from_slice(&name_bytes[..len]);
+
+        if name_bytes.len() > ifr.ifr_name.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "interface name too long",
+            ));
+        }
+
+        ifr.ifr_name.copy_from_slice(&name_bytes);
 
         let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
         addr.sin_family = AF_INET as u16;
@@ -114,8 +122,15 @@ impl NetConfigManager {
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         let name_bytes = interface_name.as_bytes_with_nul();
-        let len = ifr.ifr_name.len().min(name_bytes.len());
-        ifr.ifr_name[..len].copy_from_slice(&name_bytes[..len]);
+
+        if name_bytes.len() > ifr.ifr_name.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "interface name too long",
+            ));
+        }
+
+        ifr.ifr_name.copy_from_slice(&name_bytes);
 
         let mut mask_addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
         mask_addr.sin_family = AF_INET as u16;
@@ -151,16 +166,17 @@ impl NetConfigManager {
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         let name_bytes = interface_name.as_bytes_with_nul();
-        let len = ifr.ifr_name.len().min(name_bytes.len());
-        ifr.ifr_name[..len].copy_from_slice(&name_bytes[..len]);
 
-        let res = unsafe {
-            ioctl(
-                self.control_socket,
-                libc::SIOCGIFFLAGS,
-                &mut ifr as *mut _,
-            )
-        };
+        if name_bytes.len() > ifr.ifr_name.len() {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "interface name too long",
+            ));
+        }
+
+        ifr.ifr_name.copy_from_slice(&name_bytes);
+
+        let res = unsafe { ioctl(self.control_socket, libc::SIOCGIFFLAGS, &mut ifr as *mut _) };
         if res < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -172,13 +188,7 @@ impl NetConfigManager {
         }
 
         // Set the flags back
-        let res = unsafe {
-            ioctl(
-                self.control_socket,
-                libc::SIOCSIFFLAGS,
-                &mut ifr as *mut _,
-            )
-        };
+        let res = unsafe { ioctl(self.control_socket, libc::SIOCSIFFLAGS, &mut ifr as *mut _) };
         if res < 0 {
             return Err(std::io::Error::last_os_error());
         }
@@ -186,18 +196,30 @@ impl NetConfigManager {
         Ok(())
     }
 
-    pub fn set_gateway(&self, interface_index: u32, gateway: Ipv4Addr) -> std::io::Result<()> {
-        /// Converts a reference to a struct into a boxed slice of its bytes.
-        /// # Safety
-        /// Only use with plain-old-data structs (no pointers, no drop logic).
+    pub fn set_gateway(&self, interface_name: &str, gateway: Ipv4Addr) -> std::io::Result<()> {
         unsafe fn struct_as_bytes<T>(s: &T) -> Box<[u8]> {
-            let size = std::mem::size_of::<T>();
+            let size = size_of::<T>();
             let ptr = s as *const T as *const u8;
             unsafe {
                 std::slice::from_raw_parts(ptr, size)
                     .to_vec()
                     .into_boxed_slice()
             }
+        }
+
+        unsafe fn bytes_as_struct<T>(bytes: &[u8]) -> T {
+            assert_eq!(bytes.len(), size_of::<T>());
+            unsafe { std::ptr::read(bytes.as_ptr() as *const T) }
+        }
+
+
+        // the reason why I dont pass a index right a way and derive becaue I think it is safer and more inline with the rest of the methods
+        // the fact is cheking if the index is valid would require the same amount of code but it would not be inline so that is why I decied to put a 
+        // interface name as a parameter
+        let interface_index =
+            unsafe { libc::if_nametoindex(CString::new(interface_name).map_err(|err| std::io::Error::from(err))?.as_ptr()) };
+        if interface_index == 0 {
+            return Err(std::io::Error::last_os_error().into());
         }
 
         let mut header: libc::nlmsghdr = libc::nlmsghdr {
@@ -221,23 +243,24 @@ impl NetConfigManager {
         };
 
         let gateway_attribute: RtAttr = RtAttr {
-            rta_len: (std::mem::size_of::<RtAttr>() + 4) as u16,
+            rta_len: (size_of::<RtAttr>() + 4) as u16,
             rta_type: libc::RTA_GATEWAY,
         };
 
         let interface_attribute: RtAttr = RtAttr {
-            rta_len: (std::mem::size_of::<RtAttr>() + 4) as u16,
+            rta_len: (size_of::<RtAttr>() + 4) as u16,
             rta_type: libc::RTA_OIF,
         };
 
         let gateway_addr = u32::from(gateway);
 
         let mut buffer: Vec<u8> = Vec::with_capacity(
-            std::mem::size_of_val(&header)
-                + std::mem::size_of_val(&message)
-                + std::mem::size_of::<RtAttr>() * 2
+            size_of_val(&header)
+                + size_of_val(&message)
+                + size_of::<RtAttr>() * 2
                 + 8, // these 8 bytes are for the added gatway address and intreface index
         );
+        header.nlmsg_len = buffer.capacity() as u32;
 
         unsafe {
             buffer.extend_from_slice(&struct_as_bytes(&header));
@@ -248,17 +271,63 @@ impl NetConfigManager {
             buffer.extend_from_slice(&interface_index.to_be_bytes());
         }
 
-        let send_result = unsafe {
+        let operaton_result = unsafe {
             libc::send(
                 self.netlink_socket,
                 &buffer as *const _ as *const c_void,
                 buffer.len(),
-                0
+                0,
             )
         };
 
-        if send_result < 0 {
+        if operaton_result < 0 {
             return Err(std::io::Error::last_os_error());
+        }
+
+        let mut buffer: [u8; 1024] = [0; 1024];
+
+        let operation_result = unsafe {
+            libc::recv(
+                self.netlink_socket,
+                buffer.as_mut_ptr() as *mut c_void,
+                1024,
+                0,
+            )
+        };
+
+        if operation_result < 0 {
+            return Err(std::io::Error::last_os_error());
+        }
+
+        let ack_header: libc::nlmsghdr =
+            unsafe { bytes_as_struct(&buffer[..size_of::<libc::nlmsghdr>()]) };
+
+        if ack_header.nlmsg_type != libc::NLMSG_ERROR as u16 {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::Other,
+                "Failed to set gateway the netlink ack message is invalid",
+            ));
+        }
+
+        let ack_message: libc::nlmsgerr = unsafe {
+            bytes_as_struct(
+                &buffer
+                    [size_of::<libc::nlmsghdr>()..size_of::<libc::nlmsgerr>()],
+            )
+        };
+
+        if ack_message.error != 0 {
+            return Err(std::io::Error::from_raw_os_error(ack_message.error));
+        }
+
+        Ok(())
+    }
+
+    pub fn set_dns(&self, dns: &[Ipv4Addr]) -> std::io::Result<()> {
+        let mut dns_file = std::fs::File::create("/etc/resolv.conf")?;
+
+        for addr in dns {
+            dns_file.write_all(format!("nameserver {}\n", addr).as_bytes())?;
         }
 
         Ok(())

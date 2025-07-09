@@ -31,4 +31,6 @@ pub enum DhcpClientError {
     DhcpInvalidState,
     #[error("The DHCP response sent by the server is missing {0}")]
     DhcpResponseOptionsMissingComponent(Box<str>),
+    #[error("gateway list is empty")]
+    GatewayListEmpty,
 }

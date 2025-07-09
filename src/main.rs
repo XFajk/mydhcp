@@ -1,24 +1,29 @@
-mod netconfig_help;
 mod dhcp_help;
 mod error;
+mod netconfig_help;
 mod socket_help;
 
-use dhcp_help::*;
 use error::DhcpClientError;
 use etherparse::{PacketBuilder, SlicedPacket, TransportSlice};
 use std::{env::args, net::Ipv4Addr, rc::Rc};
+use log::{info, error};
 
+use dhcp_help::*;
 use socket_help::RawSocket;
 
+use crate::netconfig_help::NetConfigManager;
+
 fn main() {
+    env_logger::init();
+
     let args: Vec<String> = args().collect();
 
     let client = DhcpClient::establish_dhcp_connection(&args);
-    match client {
-        Ok(_) => {}
-        Err(e) => panic!("{}", e),
+    if let Err(e) = client {
+        error!("Failed to establish DHCP connection: {}", e);
+        panic!();
     }
-
+    
     println!("{:#?}", client);
 }
 
@@ -53,7 +58,14 @@ enum DhcpClient {
         server_ip: Ipv4Addr,
         acknowledged_options: Rc<[DhcpOption]>,
     },
-    Active,
+    Active {
+        socket: RawSocket,
+        transaction_id: u32,
+        ip: Ipv4Addr,
+        server_ip: Ipv4Addr,
+        acknowledged_options: Rc<[DhcpOption]>,
+        lease_time: std::time::Duration,
+    },
 }
 
 impl DhcpClient {
@@ -63,8 +75,9 @@ impl DhcpClient {
             .discover()?
             .receive_offer()?
             .request()?
-            .receive_acknowledgement()
-    }
+            .receive_acknowledgement()?
+            .activate()    
+        }
 
     fn new() -> Self {
         Self::Disconnected
@@ -72,10 +85,13 @@ impl DhcpClient {
 
     fn connect(self, args: &[String]) -> Result<Self, DhcpClientError> {
         if let Self::Disconnected = self {
+            info!(target: "mydhcp::connect", "Setting UP the DHCP Client");
+
             let interface_name = args
                 .get(1)
                 .ok_or(error::DhcpClientError::MissingInterface)?;
 
+            info!(target: "mydhcp::connect", "- Creating a Socket for DHCP comunication on interface: {}", interface_name);
             let socket = RawSocket::bind(interface_name)?;
             socket.set_filter_command("udp port 68 or udp port 67")?;
 
@@ -86,12 +102,14 @@ impl DhcpClient {
     }
 
     fn discover(self) -> Result<Self, error::DhcpClientError> {
+        info!(target: "mydhcp::discover", "Preparing to send DHCP Discover packet");
         if let Self::Connected { socket } = self {
             let transaction_id = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as u32
                 ^ std::process::id();
-
+            info!(target: "mydhcp::discover", "- Constructed a transaction ID: {}", transaction_id);
+            info!(target: "mydhcp::discover", "- Building the DHCP Discover packet");
             let packet_builder = PacketBuilder::ethernet2(
                 socket.interface_mac_address,
                 [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
@@ -105,6 +123,7 @@ impl DhcpClient {
             let mut raw_packet = Vec::<u8>::with_capacity(packet_builder.size(raw_payload.len()));
 
             packet_builder.write(&mut raw_packet, &raw_payload)?;
+            info!(target: "mydhcp::discover", "- Sending the DHCP Discover packet");
             socket.send_to(
                 &raw_packet,
                 &[0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8],
@@ -125,6 +144,7 @@ impl DhcpClient {
             transaction_id,
         } = self
         {
+            info!(target: "mydhcp::receive_offer", "Waiting for DHCP Offer packet");
             let response = unsafe {
                 Self::get_dhcp_response(
                     &socket,
@@ -132,7 +152,9 @@ impl DhcpClient {
                     std::time::Duration::from_secs(10),
                 )?
             };
+            info!(target: "mydhcp::receive_offer", "- Received DHCP Offer packet");
 
+            info!(target: "mydhcp::receive_offer", "- Parsing DHCP options from the response");
             let dhcp_options = DhcpOption::parse_dhcp_options(&response.dhcp_options)
                 .ok_or(DhcpClientError::DhcpOptionParsingError)?;
 
@@ -147,6 +169,7 @@ impl DhcpClient {
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
             };
+            info!(target: "mydhcp::receive_offer", "- DHCP Server IP address: {}", server_ip);
 
             Ok(Self::ReceivedOffer {
                 socket,
@@ -169,13 +192,15 @@ impl DhcpClient {
             dhcp_options,
         } = self
         {
+            info!(target: "mydhcp::request", "Preparing to send DHCP Request packet");
+            info!(target: "mydhcp::request", "- Building the DHCP Request packet");
             let packet_builder = PacketBuilder::ethernet2(
                 socket.interface_mac_address,
                 [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
             )
             .ipv4(ip.octets(), server_ip.octets(), 10)
             .udp(68, 67);
-
+            
             let dhcp_payload =
                 DhcpPayload::request(&socket.interface, transaction_id, ip, server_ip);
             let raw_payload = dhcp_payload.to_bytes();
@@ -183,6 +208,8 @@ impl DhcpClient {
             let mut raw_packet = Vec::<u8>::with_capacity(packet_builder.size(raw_payload.len()));
 
             packet_builder.write(&mut raw_packet, &raw_payload)?;
+
+            info!(target: "mydhcp::request", "- Sending the DHCP Request packet");
             socket.send_to(
                 &raw_packet,
                 &[0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8],
@@ -209,6 +236,7 @@ impl DhcpClient {
             offered_dhcp_options,
         } = self
         {
+            info!(target: "mydhcp::receive_acknowledgement", "Waiting for DHCP Acknowledgment packet");
             let acknowledgement = unsafe {
                 Self::get_dhcp_response(
                     &socket,
@@ -216,15 +244,18 @@ impl DhcpClient {
                     std::time::Duration::from_secs(10),
                 )?
             };
+            info!(target: "mydhcp::receive_acknowledgement", "- Received DHCP Acknowledgment packet");
 
+            info!(target: "mydhcp::receive_acknowledgement", "- Parsing DHCP options from the acknowledgment");            
             let dhcp_options = DhcpOption::parse_dhcp_options(&acknowledgement.dhcp_options)
                 .ok_or(DhcpClientError::DhcpOptionParsingError)?;
 
+            info!(target: "mydhcp::receive_acknowledgement", "- Analyzing differences DHCP options from the offer and acknowledgment");
             let differences = compare_dhcp_options(&dhcp_options, &offered_dhcp_options);
             for diff in differences {
                 println!("{:?} -> {:?}", diff.0, diff.1);
             }
-            // TODO add a propt here if the user is ok with these changes
+            // TODO add a prompt here if the user is ok with these changes
 
             let acknowledged_options = combine_dhcp_options(&dhcp_options, &offered_dhcp_options);
 
@@ -248,7 +279,10 @@ impl DhcpClient {
             acknowledged_options,
         } = self
         {
-            let mask = match acknowledged_options 
+            info!(target: "mydhcp::activate", "Activating the DHCP Client with the received configuration");
+
+
+            let mask = match acknowledged_options
                 .iter()
                 .find(|x| matches!(x, DhcpOption::SubnetMask(_)))
                 .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
@@ -259,6 +293,7 @@ impl DhcpClient {
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
             };
+            info!(target: "mydhcp::activate", "- Subnet Mask: {}", mask);
 
             let dns_servers = match acknowledged_options
                 .iter()
@@ -271,6 +306,7 @@ impl DhcpClient {
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
             };
+            info!(target: "mydhcp::activate", "- DNS Servers: {:?}", dns_servers);
 
             let gateways = match acknowledged_options
                 .iter()
@@ -283,6 +319,7 @@ impl DhcpClient {
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
             };
+            info!(target: "mydhcp::activate", "- Gateways: {:?}", gateways);
 
             let lease_time = *match acknowledged_options
                 .iter()
@@ -295,11 +332,37 @@ impl DhcpClient {
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
             };
+            info!(target: "mydhcp::activate", "- Lease Time: {} seconds", lease_time);
 
-            Ok(DhcpClient::Active)
+            info!(target: "mydhcp::activate", "- Configuring the network with the received options");
+            let net_config = NetConfigManager::new()?;
+            net_config.set_ip(&socket.interface, ip)?;
+            net_config.set_mask(&socket.interface, mask)?;
+            net_config.set_gateway(
+                &socket.interface,
+                gateways
+                    .get(0)
+                    .ok_or(DhcpClientError::GatewayListEmpty)?
+                    .clone(),
+            )?;
+            net_config.set_dns(&dns_servers)?;
+            net_config.enable(&socket.interface)?;
+
+            Ok(DhcpClient::Active {
+                socket,
+                transaction_id,
+                ip,
+                server_ip,
+                acknowledged_options,
+                lease_time: std::time::Duration::from_secs(lease_time as u64),
+            })
         } else {
             Err(DhcpClientError::DhcpInvalidState)
         }
+    }
+
+    fn run(&self) {
+        // TODO: Implement the main loop for the DHCP client
     }
 }
 
@@ -397,6 +460,3 @@ fn combine_dhcp_options(
 
     result.into()
 }
-
-
-
