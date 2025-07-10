@@ -4,9 +4,14 @@ mod netconfig_help;
 mod socket_help;
 
 use error::DhcpClientError;
-use etherparse::{PacketBuilder, SlicedPacket, TransportSlice};
-use log::{error, info};
-use std::{env::args, io::{self, Write}, net::Ipv4Addr, rc::Rc};
+use etherparse::{PacketBuilder, SlicedPacket};
+use log::{error, info, warn};
+use std::{
+    env::args,
+    io::{self, Write},
+    net::Ipv4Addr,
+    rc::Rc,
+};
 
 use dhcp_help::*;
 use socket_help::RawSocket;
@@ -65,6 +70,8 @@ enum DhcpClient {
         server_ip: Ipv4Addr,
         acknowledged_options: Rc<[DhcpOption]>,
         lease_time: std::time::Duration,
+        renewal_time: std::time::Duration,
+        rebinding_time: std::time::Duration,
     },
 }
 
@@ -252,7 +259,9 @@ impl DhcpClient {
 
             info!(target: "mydhcp::receive_acknowledgement", "- Analyzing differences DHCP options from the offer and acknowledgment");
             let differences = compare_dhcp_options(&dhcp_options, &offered_dhcp_options);
-            println!("The following options were added or changed from the offer to the acknowledgment:");
+            println!(
+                "The following options were added or changed from the offer to the acknowledgment:"
+            );
             for diff in differences.iter() {
                 println!("{:?} -> {:?}", diff.0, diff.1);
             }
@@ -336,6 +345,39 @@ impl DhcpClient {
             };
             info!(target: "mydhcp::activate", "- Lease Time: {} seconds", lease_time);
 
+            // Extract T1 and T2 timers from acknowledged_options, with defaults and warnings
+            let t1 = match acknowledged_options
+                .iter()
+                .find(|x| matches!(x, DhcpOption::RenewalTime(_)))
+            {
+                Some(DhcpOption::RenewalTime(val)) => {
+                    info!(target: "mydhcp::activate", "- Renewal (T1) Time: {} seconds", val);
+                    *val
+                }
+                _ => {
+                    warn!(
+                        "T1 (Renewal Time) not provided by server, using default (50% of lease time)"
+                    );
+                    lease_time / 2
+                }
+            };
+
+            let t2 = match acknowledged_options
+                .iter()
+                .find(|x| matches!(x, DhcpOption::RebindingTime(_)))
+            {
+                Some(DhcpOption::RebindingTime(val)) => {
+                    info!(target: "mydhcp::activate", "- Rebinding (T2) Time: {} seconds", val);
+                    *val
+                }
+                _ => {
+                    warn!(
+                        "T2 (Rebinding Time) not provided by server, using default (87.5% of lease time)"
+                    );
+                    (lease_time as f64 * 0.875) as u32
+                }
+            };
+
             info!(target: "mydhcp::activate", "- Configuring the network with the received options");
             let net_config = NetConfigManager::new()?;
             net_config.set_ip(&socket.interface, ip)?;
@@ -357,12 +399,13 @@ impl DhcpClient {
                 server_ip,
                 acknowledged_options,
                 lease_time: std::time::Duration::from_secs(lease_time as u64),
+                renewal_time: std::time::Duration::from_secs(t1 as u64),
+                rebinding_time: std::time::Duration::from_secs(t2 as u64),  
             })
         } else {
             Err(DhcpClientError::DhcpInvalidState)
         }
     }
- 
 }
 
 impl DhcpClient {
@@ -375,13 +418,7 @@ impl DhcpClient {
         time_out: std::time::Duration,
     ) -> Result<DhcpPayload, error::DhcpClientError> {
         let is_desired_packet = |packet: SlicedPacket| -> Option<DhcpPayload> {
-            let dhcp_payload: Option<DhcpPayload> = match packet.transport {
-                Some(TransportSlice::Udp(upd_slice)) => unsafe {
-                    DhcpPayload::from_bytes(upd_slice.payload())
-                },
-                _ => return None,
-            };
-
+            let dhcp_payload: Option<DhcpPayload> = unsafe { DhcpPayload::from_sliced_packet(packet) };
             let dhcp_payload = match dhcp_payload {
                 Some(value) => value,
                 None => return None,

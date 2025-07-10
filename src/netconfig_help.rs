@@ -1,4 +1,4 @@
-use libc::{AF_INET, AF_NETLINK, IFF_UP, ioctl};
+use libc::{AF_INET, AF_NETLINK, ioctl};
 use std::{
     ffi::{c_void, CString}, io::Write, mem::{size_of, size_of_val}, net::Ipv4Addr, os::fd::RawFd
 };

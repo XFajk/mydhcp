@@ -25,8 +25,6 @@ pub enum DhcpClientError {
     TimedOut(std::time::Duration),
     #[error("Dhcp Options are incorrectly formatted")]
     DhcpOptionParsingError,
-    #[error("The Array of bytes isn't long enough")]
-    DhcpConstructionError,
     #[error("The DHCP client is in incorrect state for this operation")]
     DhcpInvalidState,
     #[error("The DHCP response sent by the server is missing {0}")]
