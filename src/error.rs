@@ -33,4 +33,6 @@ pub enum DhcpClientError {
     DhcpResponseOptionsMissingComponent(Box<str>),
     #[error("gateway list is empty")]
     GatewayListEmpty,
+    #[error("Dhcp response options were rejected by the client")]
+    DhcpResponseOptionsRejected,
 }

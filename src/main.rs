@@ -5,8 +5,8 @@ mod socket_help;
 
 use error::DhcpClientError;
 use etherparse::{PacketBuilder, SlicedPacket, TransportSlice};
-use std::{env::args, net::Ipv4Addr, rc::Rc};
-use log::{info, error};
+use log::{error, info};
+use std::{env::args, io::{self, Write}, net::Ipv4Addr, rc::Rc};
 
 use dhcp_help::*;
 use socket_help::RawSocket;
@@ -23,7 +23,7 @@ fn main() {
         error!("Failed to establish DHCP connection: {}", e);
         panic!();
     }
-    
+
     println!("{:#?}", client);
 }
 
@@ -76,8 +76,8 @@ impl DhcpClient {
             .receive_offer()?
             .request()?
             .receive_acknowledgement()?
-            .activate()    
-        }
+            .activate()
+    }
 
     fn new() -> Self {
         Self::Disconnected
@@ -200,7 +200,7 @@ impl DhcpClient {
             )
             .ipv4(ip.octets(), server_ip.octets(), 10)
             .udp(68, 67);
-            
+
             let dhcp_payload =
                 DhcpPayload::request(&socket.interface, transaction_id, ip, server_ip);
             let raw_payload = dhcp_payload.to_bytes();
@@ -246,16 +246,19 @@ impl DhcpClient {
             };
             info!(target: "mydhcp::receive_acknowledgement", "- Received DHCP Acknowledgment packet");
 
-            info!(target: "mydhcp::receive_acknowledgement", "- Parsing DHCP options from the acknowledgment");            
+            info!(target: "mydhcp::receive_acknowledgement", "- Parsing DHCP options from the acknowledgment");
             let dhcp_options = DhcpOption::parse_dhcp_options(&acknowledgement.dhcp_options)
                 .ok_or(DhcpClientError::DhcpOptionParsingError)?;
 
             info!(target: "mydhcp::receive_acknowledgement", "- Analyzing differences DHCP options from the offer and acknowledgment");
             let differences = compare_dhcp_options(&dhcp_options, &offered_dhcp_options);
-            for diff in differences {
+            println!("The following options were added or changed from the offer to the acknowledgment:");
+            for diff in differences.iter() {
                 println!("{:?} -> {:?}", diff.0, diff.1);
             }
-            // TODO add a prompt here if the user is ok with these changes
+            if !prompt_yes_no("Do you want to continue with the received options?") {
+                return Err(DhcpClientError::DhcpResponseOptionsRejected);
+            }
 
             let acknowledged_options = combine_dhcp_options(&dhcp_options, &offered_dhcp_options);
 
@@ -280,7 +283,6 @@ impl DhcpClient {
         } = self
         {
             info!(target: "mydhcp::activate", "Activating the DHCP Client with the received configuration");
-
 
             let mask = match acknowledged_options
                 .iter()
@@ -360,10 +362,7 @@ impl DhcpClient {
             Err(DhcpClientError::DhcpInvalidState)
         }
     }
-
-    fn run(&self) {
-        // TODO: Implement the main loop for the DHCP client
-    }
+ 
 }
 
 impl DhcpClient {
@@ -459,4 +458,12 @@ fn combine_dhcp_options(
     }
 
     result.into()
+}
+
+fn prompt_yes_no(prompt: &str) -> bool {
+    print!("{} [y/n]: ", prompt);
+    io::stdout().flush().unwrap();
+    let mut input = String::new();
+    io::stdin().read_line(&mut input).unwrap();
+    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
 }
