@@ -11,7 +11,6 @@ use std::{
     net::Ipv4Addr,
     rc::Rc,
     sync::{
-        Arc,
         atomic::{AtomicBool, Ordering},
     },
 };
@@ -21,23 +20,23 @@ use socket_help::RawSocket;
     
 use crate::netconfig_help::NetConfigManager;
 
+static SHOULD_SHUTDOWN: AtomicBool = AtomicBool::new(false);
+
 fn main() {
     env_logger::init();
 
-    let shutdown_flag = Arc::new(AtomicBool::new(false));
 
     // Clone the flag to move into the signal handler
-    let shutdown_clone = Arc::clone(&shutdown_flag);
-    if let Err(e) = ctrlc::set_handler(move || {
+    if let Err(e) = ctrlc::set_handler( || {
         info!("SIGINT received! Setting shutdown flag. The process will shutdown gracefully soon");
-        shutdown_clone.store(true, Ordering::SeqCst);
+        SHOULD_SHUTDOWN.store(true, Ordering::SeqCst);
     }) {
         error!("Failed to set Ctrl-C handler: {}", e);
         std::process::exit(1);
     }
 
     let args: Vec<String> = args().collect();
-    loop {
+    while !SHOULD_SHUTDOWN.load(Ordering::SeqCst) {
         let client = DhcpClient::establish_dhcp_connection(&args);
 
         let mut client = match client {
@@ -51,7 +50,7 @@ fn main() {
         info!("DHCP connection established successfully.");
         println!("{:#?}", client);
 
-        loop {
+        while !SHOULD_SHUTDOWN.load(Ordering::SeqCst) {
             let possibly_new_client = client.keep_track();
             match possibly_new_client {
                 Some(new_client) => {
@@ -104,7 +103,6 @@ enum DhcpClient {
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
         acknowledged_options: Rc<[DhcpOption]>,
-        activation_time: std::time::Instant,
         renewal_deadline: std::time::Instant,
         rebinding_deadline: std::time::Instant,
         expiration_deadline: std::time::Instant,
@@ -131,6 +129,7 @@ impl DhcpClient {
     }
 
     fn connect(self, args: &[String]) -> Result<Self, DhcpClientError> {
+        shutdown_on_signal();
         if let Self::Disconnected = self {
             info!(target: "mydhcp::connect", "Setting UP the DHCP Client");
 
@@ -149,8 +148,9 @@ impl DhcpClient {
     }
 
     fn discover(self) -> Result<Self, error::DhcpClientError> {
-        info!(target: "mydhcp::discover", "Preparing to send DHCP Discover packet");
+        shutdown_on_signal();
         if let Self::Connected { ref socket } = self {
+            info!(target: "mydhcp::discover", "Preparing to send DHCP Discover packet");
             let transaction_id = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as u32
@@ -187,6 +187,7 @@ impl DhcpClient {
     }
 
     fn receive_offer(self) -> Result<Self, DhcpClientError> {
+        shutdown_on_signal();
         if let Self::Discovering {
             ref socket,
             transaction_id,
@@ -234,6 +235,7 @@ impl DhcpClient {
     }
 
     fn request(self) -> Result<Self, DhcpClientError> {
+        shutdown_on_signal();
         if let DhcpClient::ReceivedOffer {
             ref socket,
             transaction_id,
@@ -278,6 +280,7 @@ impl DhcpClient {
     }
 
     fn receive_acknowledgement(self) -> Result<Self, DhcpClientError> {
+        shutdown_on_signal();
         if let DhcpClient::Requesting {
             ref socket,
             transaction_id,
@@ -325,6 +328,7 @@ impl DhcpClient {
         }
     }
     fn activate(self) -> Result<Self, DhcpClientError> {
+        shutdown_on_signal();
         if let DhcpClient::ReceivedAcknowledgment {
             ref socket,
             transaction_id,
@@ -463,7 +467,6 @@ impl DhcpClient {
                 ip,
                 server_ip,
                 acknowledged_options: Rc::clone(acknowledged_options),
-                activation_time: now,
                 renewal_deadline,
                 rebinding_deadline,
                 expiration_deadline,
@@ -480,13 +483,12 @@ impl DhcpClient {
             ip,
             server_ip,
             ref acknowledged_options,
-            activation_time,
             renewal_deadline,
             rebinding_deadline,
             expiration_deadline,
         } = self
         {
-            std::thread::sleep(renewal_deadline.saturating_duration_since(activation_time));
+            wait_until_with_abort(renewal_deadline);
             info!(target: "mydhcp::keep_track", "Resending a unicast DHCP Request packet to renew the lease");
 
             let new_client = DhcpClient::ReceivedOffer {
@@ -508,7 +510,7 @@ impl DhcpClient {
                 }
             }
 
-            std::thread::sleep(rebinding_deadline.saturating_duration_since(activation_time));
+            wait_until_with_abort(rebinding_deadline);
             info!(target: "mydhcp::keep_track", "Retring a broadcast DHCP Request packet to renew the lease");
 
             let new_client = DhcpClient::ReceivedOffer {
@@ -530,7 +532,7 @@ impl DhcpClient {
                 }
             }
 
-            std::thread::sleep(expiration_deadline.saturating_duration_since(activation_time));
+            wait_until_with_abort(expiration_deadline);
             error!(target: "mydhcp::keep_track", "Lease expired, client is no longer active.");
 
             let netconfig = NetConfigManager::new().unwrap_or_else(|err| {
@@ -686,15 +688,20 @@ fn combine_dhcp_options(
     result.into()
 }
 
-fn wait_until_with_abort(deadline: std::time::Instant, shutdown: &AtomicBool) {
+fn wait_until_with_abort(deadline: std::time::Instant) {
     use std::time::*;
 
     const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
     while Instant::now() < deadline {
-        if shutdown.load(Ordering::SeqCst) {
-            std::process::exit(0);
-        }
+        shutdown_on_signal(); 
         std::thread::sleep(POLL_INTERVAL);
     }
+}
+
+fn shutdown_on_signal() {
+    if SHOULD_SHUTDOWN.load(Ordering::SeqCst) {
+        info!("Shutdown signal received, exiting gracefully.");
+        std::process::exit(0);
+    } 
 }
