@@ -6,18 +6,17 @@ mod socket_help;
 use error::DhcpClientError;
 use etherparse::{PacketBuilder, SlicedPacket};
 use log::{error, info, warn};
+use core::panic;
 use std::{
     env::args,
     net::Ipv4Addr,
     rc::Rc,
-    sync::{
-        atomic::{AtomicBool, Ordering},
-    },
+    sync::atomic::{AtomicBool, Ordering},
 };
 
 use dhcp_help::*;
 use socket_help::RawSocket;
-    
+
 use crate::netconfig_help::NetConfigManager;
 
 static SHOULD_SHUTDOWN: AtomicBool = AtomicBool::new(false);
@@ -25,9 +24,8 @@ static SHOULD_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 fn main() {
     env_logger::init();
 
-
     // Clone the flag to move into the signal handler
-    if let Err(e) = ctrlc::set_handler( || {
+    if let Err(e) = ctrlc::set_handler(|| {
         info!("SIGINT received! Setting shutdown flag. The process will shutdown gracefully soon");
         SHOULD_SHUTDOWN.store(true, Ordering::SeqCst);
     }) {
@@ -135,7 +133,10 @@ impl DhcpClient {
 
             let interface_name = args
                 .get(1)
-                .ok_or(error::DhcpClientError::MissingInterface)?;
+                .ok_or(error::DhcpClientError::MissingInterface).unwrap_or_else(|err| {
+                    error!("FATAL: {}", err);
+                    std::process::exit(1);
+                });
 
             info!(target: "mydhcp::connect", "- Creating a Socket for DHCP comunication on interface: {}", interface_name);
             let socket = Rc::new(RawSocket::bind(interface_name)?);
@@ -221,6 +222,7 @@ impl DhcpClient {
                 ),
             };
             info!(target: "mydhcp::receive_offer", "- DHCP Server IP address: {}", server_ip);
+            info!(target: "mydhcp::receive_offer", "- DHCP My IP address: {}", response.yiaddr);
 
             Ok(Self::ReceivedOffer {
                 socket: Rc::clone(socket),
@@ -604,23 +606,11 @@ impl Drop for DhcpClient {
     fn drop(&mut self) {
         match self {
             DhcpClient::Disconnected => { /* Nothing to clean up */ }
-            DhcpClient::Connected { socket }
-            | DhcpClient::Discovering { socket, .. }
-            | DhcpClient::ReceivedOffer { socket, .. }
-            | DhcpClient::Requesting { socket, .. }
-            | DhcpClient::ReceivedAcknowledgment { socket, .. } => {
-                // Minimal cleanup: disable interface
-                if let Ok(netconfig) = NetConfigManager::new() {
-                    if let Err(e) = netconfig.disable(&socket.interface) {
-                        error!(
-                            "Failed to disable interface '{}' during drop: {}",
-                            socket.interface, e
-                        );
-                    } else {
-                        info!("Disabled interface '{}' during drop.", socket.interface);
-                    }
-                }
-            }
+            DhcpClient::Connected { .. } => { /* Nothing to clean up */ }
+            DhcpClient::Discovering { .. } => { /* Nothing to clean up */ }
+            DhcpClient::ReceivedOffer { .. } => { /* Nothing to clean up */ }
+            DhcpClient::Requesting { .. } => { /* Nothing to clean up */ }
+            DhcpClient::ReceivedAcknowledgment { .. } => { /* Nothing to clean up */ }
             DhcpClient::Active { socket, .. } => {
                 // Full cleanup: reset IP, mask, gateway, DNS, and disable interface
                 if let Ok(netconfig) = NetConfigManager::new() {
@@ -694,7 +684,7 @@ fn wait_until_with_abort(deadline: std::time::Instant) {
     const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
     while Instant::now() < deadline {
-        shutdown_on_signal(); 
+        shutdown_on_signal();
         std::thread::sleep(POLL_INTERVAL);
     }
 }
@@ -703,5 +693,5 @@ fn shutdown_on_signal() {
     if SHOULD_SHUTDOWN.load(Ordering::SeqCst) {
         info!("Shutdown signal received, exiting gracefully.");
         std::process::exit(0);
-    } 
+    }
 }
