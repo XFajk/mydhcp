@@ -8,7 +8,7 @@ use pcap::Capture;
 
 use crate::error::{self, DhcpClientError};
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct RawSocket {
     fd: RawFd,
     pub interface: Rc<str>,

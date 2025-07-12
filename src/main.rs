@@ -8,70 +8,106 @@ use etherparse::{PacketBuilder, SlicedPacket};
 use log::{error, info, warn};
 use std::{
     env::args,
-    io::{self, Write},
     net::Ipv4Addr,
     rc::Rc,
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
 };
 
 use dhcp_help::*;
 use socket_help::RawSocket;
-
+    
 use crate::netconfig_help::NetConfigManager;
 
 fn main() {
     env_logger::init();
 
-    let args: Vec<String> = args().collect();
+    let shutdown_flag = Arc::new(AtomicBool::new(false));
 
-    let client = DhcpClient::establish_dhcp_connection(&args);
-    if let Err(e) = client {
-        error!("Failed to establish DHCP connection: {}", e);
-        panic!();
+    // Clone the flag to move into the signal handler
+    let shutdown_clone = Arc::clone(&shutdown_flag);
+    if let Err(e) = ctrlc::set_handler(move || {
+        info!("SIGINT received! Setting shutdown flag. The process will shutdown gracefully soon");
+        shutdown_clone.store(true, Ordering::SeqCst);
+    }) {
+        error!("Failed to set Ctrl-C handler: {}", e);
+        std::process::exit(1);
     }
 
-    println!("{:#?}", client);
+    let args: Vec<String> = args().collect();
+    loop {
+        let client = DhcpClient::establish_dhcp_connection(&args);
+
+        let mut client = match client {
+            Ok(client) => client,
+            Err(e) => {
+                error!("Failed to establish DHCP connection: {}", e);
+                continue; // Retry on error
+            }
+        };
+
+        info!("DHCP connection established successfully.");
+        println!("{:#?}", client);
+
+        loop {
+            let possibly_new_client = client.keep_track();
+            match possibly_new_client {
+                Some(new_client) => {
+                    client = new_client;
+                    info!("DHCP lease renewed successfully.");
+                }
+                None => {
+                    error!("DHCP lease expired or could not be renewed, reconnecting...");
+                    break; // Exit the loop if lease cannot be renewed
+                }
+            }
+        }
+    }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 enum DhcpClient {
     Disconnected,
     Connected {
-        socket: RawSocket,
+        socket: Rc<RawSocket>,
     },
     Discovering {
-        socket: RawSocket,
+        socket: Rc<RawSocket>,
         transaction_id: u32,
     },
     ReceivedOffer {
-        socket: RawSocket,
+        socket: Rc<RawSocket>,
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
         dhcp_options: Rc<[DhcpOption]>,
     },
     Requesting {
-        socket: RawSocket,
+        socket: Rc<RawSocket>,
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
         offered_dhcp_options: Rc<[DhcpOption]>,
     },
     ReceivedAcknowledgment {
-        socket: RawSocket,
+        socket: Rc<RawSocket>,
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
         acknowledged_options: Rc<[DhcpOption]>,
     },
     Active {
-        socket: RawSocket,
+        socket: Rc<RawSocket>,
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
         acknowledged_options: Rc<[DhcpOption]>,
-        lease_time: std::time::Duration,
-        renewal_time: std::time::Duration,
-        rebinding_time: std::time::Duration,
+        activation_time: std::time::Instant,
+        renewal_deadline: std::time::Instant,
+        rebinding_deadline: std::time::Instant,
+        expiration_deadline: std::time::Instant,
     },
 }
 
@@ -84,6 +120,10 @@ impl DhcpClient {
             .request()?
             .receive_acknowledgement()?
             .activate()
+    }
+
+    fn retry_requesting(self) -> Result<Self, DhcpClientError> {
+        self.request()?.receive_acknowledgement()?.activate()
     }
 
     fn new() -> Self {
@@ -99,7 +139,7 @@ impl DhcpClient {
                 .ok_or(error::DhcpClientError::MissingInterface)?;
 
             info!(target: "mydhcp::connect", "- Creating a Socket for DHCP comunication on interface: {}", interface_name);
-            let socket = RawSocket::bind(interface_name)?;
+            let socket = Rc::new(RawSocket::bind(interface_name)?);
             socket.set_filter_command("udp port 68 or udp port 67")?;
 
             Ok(Self::Connected { socket })
@@ -110,12 +150,13 @@ impl DhcpClient {
 
     fn discover(self) -> Result<Self, error::DhcpClientError> {
         info!(target: "mydhcp::discover", "Preparing to send DHCP Discover packet");
-        if let Self::Connected { socket } = self {
+        if let Self::Connected { ref socket } = self {
             let transaction_id = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)?
                 .as_millis() as u32
                 ^ std::process::id();
             info!(target: "mydhcp::discover", "- Constructed a transaction ID: {}", transaction_id);
+
             info!(target: "mydhcp::discover", "- Building the DHCP Discover packet");
             let packet_builder = PacketBuilder::ethernet2(
                 socket.interface_mac_address,
@@ -137,7 +178,7 @@ impl DhcpClient {
             )?;
 
             Ok(Self::Discovering {
-                socket,
+                socket: Rc::clone(socket),
                 transaction_id,
             })
         } else {
@@ -147,7 +188,7 @@ impl DhcpClient {
 
     fn receive_offer(self) -> Result<Self, DhcpClientError> {
         if let Self::Discovering {
-            socket,
+            ref socket,
             transaction_id,
         } = self
         {
@@ -165,6 +206,8 @@ impl DhcpClient {
             let dhcp_options = DhcpOption::parse_dhcp_options(&response.dhcp_options)
                 .ok_or(DhcpClientError::DhcpOptionParsingError)?;
 
+            // TODO: check if the DHCP options contain the correct DHCP option aka make sure it is an DHCP Offer
+
             let server_ip = match (*dhcp_options)
                 .iter()
                 .find(|x| matches!(x, DhcpOption::ServerId(_)))
@@ -179,7 +222,7 @@ impl DhcpClient {
             info!(target: "mydhcp::receive_offer", "- DHCP Server IP address: {}", server_ip);
 
             Ok(Self::ReceivedOffer {
-                socket,
+                socket: Rc::clone(socket),
                 transaction_id,
                 ip: response.yiaddr,
                 server_ip,
@@ -192,11 +235,11 @@ impl DhcpClient {
 
     fn request(self) -> Result<Self, DhcpClientError> {
         if let DhcpClient::ReceivedOffer {
-            socket,
+            ref socket,
             transaction_id,
             ip,
             server_ip,
-            dhcp_options,
+            ref dhcp_options,
         } = self
         {
             info!(target: "mydhcp::request", "Preparing to send DHCP Request packet");
@@ -223,11 +266,11 @@ impl DhcpClient {
             )?;
 
             Ok(DhcpClient::Requesting {
-                socket,
+                socket: Rc::clone(socket),
                 transaction_id,
                 ip,
                 server_ip,
-                offered_dhcp_options: dhcp_options,
+                offered_dhcp_options: Rc::clone(dhcp_options),
             })
         } else {
             Err(DhcpClientError::DhcpInvalidState)
@@ -236,11 +279,11 @@ impl DhcpClient {
 
     fn receive_acknowledgement(self) -> Result<Self, DhcpClientError> {
         if let DhcpClient::Requesting {
-            socket,
+            ref socket,
             transaction_id,
             ip,
             server_ip,
-            offered_dhcp_options,
+            ref offered_dhcp_options,
         } = self
         {
             info!(target: "mydhcp::receive_acknowledgement", "Waiting for DHCP Acknowledgment packet");
@@ -252,6 +295,8 @@ impl DhcpClient {
                 )?
             };
             info!(target: "mydhcp::receive_acknowledgement", "- Received DHCP Acknowledgment packet");
+
+            // TODO: check if the DHCP options contain the correct DHCP option aka make sure it is an DHCP Offer
 
             info!(target: "mydhcp::receive_acknowledgement", "- Parsing DHCP options from the acknowledgment");
             let dhcp_options = DhcpOption::parse_dhcp_options(&acknowledgement.dhcp_options)
@@ -265,14 +310,11 @@ impl DhcpClient {
             for diff in differences.iter() {
                 println!("{:?} -> {:?}", diff.0, diff.1);
             }
-            if !prompt_yes_no("Do you want to continue with the received options?") {
-                return Err(DhcpClientError::DhcpResponseOptionsRejected);
-            }
 
             let acknowledged_options = combine_dhcp_options(&dhcp_options, &offered_dhcp_options);
 
             Ok(DhcpClient::ReceivedAcknowledgment {
-                socket,
+                socket: Rc::clone(socket),
                 transaction_id,
                 ip,
                 server_ip,
@@ -284,14 +326,29 @@ impl DhcpClient {
     }
     fn activate(self) -> Result<Self, DhcpClientError> {
         if let DhcpClient::ReceivedAcknowledgment {
-            socket,
+            ref socket,
             transaction_id,
             ip,
             server_ip,
-            acknowledged_options,
+            ref acknowledged_options,
         } = self
         {
             info!(target: "mydhcp::activate", "Activating the DHCP Client with the received configuration");
+
+            if server_ip == Ipv4Addr::BROADCAST {
+                let server_ip = match (*acknowledged_options)
+                    .iter()
+                    .find(|x| matches!(x, DhcpOption::ServerId(_)))
+                    .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
+                        "Server IP address".into(),
+                    ))? {
+                    DhcpOption::ServerId(ip) => *ip,
+                    _ => panic!(
+                        "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
+                    ),
+                };
+                info!(target: "mydhcp::receive_offer", "- DHCP Server IP address: {}", server_ip);
+            }
 
             let mask = match acknowledged_options
                 .iter()
@@ -332,13 +389,13 @@ impl DhcpClient {
             };
             info!(target: "mydhcp::activate", "- Gateways: {:?}", gateways);
 
-            let lease_time = *match acknowledged_options
+            let lease_time = match acknowledged_options
                 .iter()
                 .find(|x| matches!(x, DhcpOption::IpAddressLeaseTime(_)))
                 .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
                     "IP Address Lease Time".into(),
                 ))? {
-                DhcpOption::IpAddressLeaseTime(t) => t,
+                DhcpOption::IpAddressLeaseTime(t) => *t,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
@@ -378,32 +435,122 @@ impl DhcpClient {
                 }
             };
 
+            let lease_time = std::time::Duration::from_secs(lease_time as u64);
+            let t1 = std::time::Duration::from_secs(t1 as u64);
+            let t2 = std::time::Duration::from_secs(t2 as u64);
+            let now = std::time::Instant::now();
+            let renewal_deadline = now + t1;
+            let rebinding_deadline = now + t2;
+            let expiration_deadline = now + lease_time;
+
             info!(target: "mydhcp::activate", "- Configuring the network with the received options");
-            let net_config = NetConfigManager::new()?;
-            net_config.set_ip(&socket.interface, ip)?;
-            net_config.set_mask(&socket.interface, mask)?;
-            net_config.set_gateway(
+            let netconfig = NetConfigManager::new()?;
+            netconfig.set_ip(&socket.interface, ip)?;
+            netconfig.set_mask(&socket.interface, mask)?;
+            netconfig.set_gateway(
                 &socket.interface,
                 gateways
                     .get(0)
                     .ok_or(DhcpClientError::GatewayListEmpty)?
                     .clone(),
             )?;
-            net_config.set_dns(&dns_servers)?;
-            net_config.enable(&socket.interface)?;
+            netconfig.set_dns(&dns_servers)?;
+            netconfig.enable(&socket.interface)?;
 
             Ok(DhcpClient::Active {
-                socket,
+                socket: Rc::clone(socket),
                 transaction_id,
                 ip,
                 server_ip,
-                acknowledged_options,
-                lease_time: std::time::Duration::from_secs(lease_time as u64),
-                renewal_time: std::time::Duration::from_secs(t1 as u64),
-                rebinding_time: std::time::Duration::from_secs(t2 as u64),  
+                acknowledged_options: Rc::clone(acknowledged_options),
+                activation_time: now,
+                renewal_deadline,
+                rebinding_deadline,
+                expiration_deadline,
             })
         } else {
             Err(DhcpClientError::DhcpInvalidState)
+        }
+    }
+
+    fn keep_track(self) -> Option<Self> {
+        if let DhcpClient::Active {
+            ref socket,
+            transaction_id,
+            ip,
+            server_ip,
+            ref acknowledged_options,
+            activation_time,
+            renewal_deadline,
+            rebinding_deadline,
+            expiration_deadline,
+        } = self
+        {
+            std::thread::sleep(renewal_deadline.saturating_duration_since(activation_time));
+            info!(target: "mydhcp::keep_track", "Resending a unicast DHCP Request packet to renew the lease");
+
+            let new_client = DhcpClient::ReceivedOffer {
+                socket: Rc::clone(&socket),
+                transaction_id,
+                ip,
+                server_ip,
+                dhcp_options: Rc::clone(&acknowledged_options),
+            }
+            .retry_requesting();
+
+            match new_client {
+                Ok(new_client) => {
+                    info!(target: "mydhcp::keep_track", "Lease renewed successfully.");
+                    return Some(new_client);
+                }
+                Err(e) => {
+                    warn!(target: "mydhcp::keep_track", "Failed to renew lease: {}", e);
+                }
+            }
+
+            std::thread::sleep(rebinding_deadline.saturating_duration_since(activation_time));
+            info!(target: "mydhcp::keep_track", "Retring a broadcast DHCP Request packet to renew the lease");
+
+            let new_client = DhcpClient::ReceivedOffer {
+                socket: Rc::clone(&socket),
+                transaction_id,
+                ip,
+                server_ip: Ipv4Addr::BROADCAST,
+                dhcp_options: Rc::clone(&acknowledged_options),
+            }
+            .retry_requesting();
+
+            match new_client {
+                Ok(new_client) => {
+                    info!(target: "mydhcp::keep_track", "Lease renewed successfully.");
+                    return Some(new_client);
+                }
+                Err(e) => {
+                    warn!(target: "mydhcp::keep_track", "Failed to renew lease: {}", e);
+                }
+            }
+
+            std::thread::sleep(expiration_deadline.saturating_duration_since(activation_time));
+            error!(target: "mydhcp::keep_track", "Lease expired, client is no longer active.");
+
+            let netconfig = NetConfigManager::new().unwrap_or_else(|err| {
+                error!("FATAL: failed to create NetConfigManager: {}", err);
+                std::process::exit(1);
+            });
+
+            info!(target: "mydhcp::keep_track", "Cleaning up network configuration for interface '{}'", socket.interface);
+            netconfig.cleanup(&socket.interface).unwrap_or_else(|err| {
+                error!(
+                    "FATAL: failed to clean up interface '{}': {}",
+                    socket.interface, err
+                );
+                std::process::exit(1);
+            });
+
+            None
+        } else {
+            error!(target: "mydhcp::keep_track", "Client is not in an active state, cannot keep track of lease.");
+            None
         }
     }
 }
@@ -418,7 +565,8 @@ impl DhcpClient {
         time_out: std::time::Duration,
     ) -> Result<DhcpPayload, error::DhcpClientError> {
         let is_desired_packet = |packet: SlicedPacket| -> Option<DhcpPayload> {
-            let dhcp_payload: Option<DhcpPayload> = unsafe { DhcpPayload::from_sliced_packet(packet) };
+            let dhcp_payload: Option<DhcpPayload> =
+                unsafe { DhcpPayload::from_sliced_packet(packet) };
             let dhcp_payload = match dhcp_payload {
                 Some(value) => value,
                 None => return None,
@@ -447,6 +595,47 @@ impl DhcpClient {
             }
         }
         return Err(error::DhcpClientError::TimedOut(time_out));
+    }
+}
+
+impl Drop for DhcpClient {
+    fn drop(&mut self) {
+        match self {
+            DhcpClient::Disconnected => { /* Nothing to clean up */ }
+            DhcpClient::Connected { socket }
+            | DhcpClient::Discovering { socket, .. }
+            | DhcpClient::ReceivedOffer { socket, .. }
+            | DhcpClient::Requesting { socket, .. }
+            | DhcpClient::ReceivedAcknowledgment { socket, .. } => {
+                // Minimal cleanup: disable interface
+                if let Ok(netconfig) = NetConfigManager::new() {
+                    if let Err(e) = netconfig.disable(&socket.interface) {
+                        error!(
+                            "Failed to disable interface '{}' during drop: {}",
+                            socket.interface, e
+                        );
+                    } else {
+                        info!("Disabled interface '{}' during drop.", socket.interface);
+                    }
+                }
+            }
+            DhcpClient::Active { socket, .. } => {
+                // Full cleanup: reset IP, mask, gateway, DNS, and disable interface
+                if let Ok(netconfig) = NetConfigManager::new() {
+                    if let Err(e) = netconfig.cleanup(&socket.interface) {
+                        error!(
+                            "Failed to clean up network configuration for interface '{}' during drop: {}",
+                            socket.interface, e
+                        );
+                    } else {
+                        info!(
+                            "Cleaned up network configuration for interface '{}' during drop.",
+                            socket.interface
+                        );
+                    }
+                }
+            }
+        }
     }
 }
 
@@ -497,10 +686,15 @@ fn combine_dhcp_options(
     result.into()
 }
 
-fn prompt_yes_no(prompt: &str) -> bool {
-    print!("{} [y/n]: ", prompt);
-    io::stdout().flush().unwrap();
-    let mut input = String::new();
-    io::stdin().read_line(&mut input).unwrap();
-    matches!(input.trim().to_lowercase().as_str(), "y" | "yes")
+fn wait_until_with_abort(deadline: std::time::Instant, shutdown: &AtomicBool) {
+    use std::time::*;
+
+    const POLL_INTERVAL: Duration = Duration::from_secs(1);
+
+    while Instant::now() < deadline {
+        if shutdown.load(Ordering::SeqCst) {
+            std::process::exit(0);
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
 }
