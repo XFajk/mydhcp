@@ -95,7 +95,7 @@ impl NetConfigManager {
             ));
         }
 
-        ifr.ifr_name.copy_from_slice(&name_bytes);
+        ifr.ifr_name[..name_bytes.len()].copy_from_slice(&name_bytes);
 
         let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
         addr.sin_family = AF_INET as u16;
@@ -133,7 +133,7 @@ impl NetConfigManager {
             ));
         }
 
-        ifr.ifr_name.copy_from_slice(&name_bytes);
+        ifr.ifr_name[..name_bytes.len()].copy_from_slice(&name_bytes);
 
         let mut mask_addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
         mask_addr.sin_family = AF_INET as u16;
@@ -176,7 +176,7 @@ impl NetConfigManager {
             ));
         }
 
-        ifr.ifr_name.copy_from_slice(&name_bytes);
+        ifr.ifr_name[..name_bytes.len()].copy_from_slice(&name_bytes);
 
         let res = unsafe { ioctl(self.control_socket, libc::SIOCGIFFLAGS, &mut ifr as *mut _) };
         if res < 0 {
@@ -333,7 +333,7 @@ impl NetConfigManager {
             ));
         }
 
-        ifr.ifr_name.copy_from_slice(&name_bytes);
+        ifr.ifr_name[..name_bytes.len()].copy_from_slice(&name_bytes);
 
         let res = unsafe { ioctl(self.control_socket, libc::SIOCGIFFLAGS, &mut ifr as *mut _) };
         if res < 0 {
