@@ -18,22 +18,23 @@ pub enum DhcpMessage {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DhcpOption {
-    SubnetMask(Ipv4Addr),                // 1
-    Gateway(Rc<[Ipv4Addr]>),             // 3
-    DomainNameServer(Rc<[Ipv4Addr]>),    // 6
-    HostName(Rc<str>),                   // 12
-    DomainName(Rc<str>),                 // 15
-    BroadcastAddress(Ipv4Addr),          // 28
-    IpAddressRequest(Ipv4Addr),          // 50
-    IpAddressLeaseTime(u32),             // 51
-    DhcpMessageType(DhcpMessage),        // 53
-    ServerId(Ipv4Addr),                  // 54
-    ParameterRequestList(Rc<[u8]>),      // 55
-    RenewalTime(u32),                    // 58
-    RebindingTime(u32),                  // 59
-    End,                                 // 255
-    Pad,                                 // 0
-    UnsupportedOption(u8, Rc<[u8]>),     // any other
+    SubnetMask(Ipv4Addr),             // 1
+    Gateway(Rc<[Ipv4Addr]>),          // 3
+    DomainNameServer(Rc<[Ipv4Addr]>), // 6
+    HostName(Rc<str>),                // 12
+    DomainName(Rc<str>),              // 15
+    BroadcastAddress(Ipv4Addr),       // 28
+    IpAddressRequest(Ipv4Addr),       // 50
+    IpAddressLeaseTime(u32),          // 51
+    DhcpMessageType(DhcpMessage),     // 53
+    ServerId(Ipv4Addr),               // 54
+    ParameterRequestList(Rc<[u8]>),   // 55
+    RenewalTime(u32),                 // 58
+    RebindingTime(u32),               // 59
+    ClientId((u8, [u8; 6])),          // 61: 1 byte type, 6 bytes MAC address
+    End,                              // 255
+    Pad,                              // 0
+    UnsupportedOption(u8, Rc<[u8]>),  // any other
 }
 
 impl From<(u8, Vec<u8>)> for DhcpOption {
@@ -99,6 +100,11 @@ impl From<(u8, Vec<u8>)> for DhcpOption {
                 Self::RebindingTime(t)
             }
             255 => Self::End,
+            61 if data.len() == 7 => {
+                let mut mac = [0u8; 6];
+                mac.copy_from_slice(&data[1..7]);
+                Self::ClientId((data[0], mac))
+            }
             _ => Self::UnsupportedOption(code, data.into()),
         }
     }
@@ -208,6 +214,12 @@ impl DhcpOption {
                     bytes.push(data.len() as u8);
                     bytes.extend_from_slice(data);
                 }
+                DhcpOption::ClientId((t, mac)) => {
+                    bytes.push(61);
+                    bytes.push(7);
+                    bytes.push(*t);
+                    bytes.extend_from_slice(mac);
+                }
             }
         }
         // Ensure the options end with End (255)
@@ -308,6 +320,42 @@ impl DhcpPayload {
             .extend_from_slice(&DhcpOption::into_bytes(&dhcp_options));
 
         request_payload
+    }
+
+    pub fn release(
+        interface_name: &str,
+        transaction_id: u32,
+        ip: Ipv4Addr,
+        server_ip: Ipv4Addr,
+    ) -> Self {
+        let mut release_payload = Self {
+            op: 1_u8,
+            htype: 1_u8,
+            hlen: 6_u8,
+            xid: transaction_id,
+            ciaddr: ip,
+
+            ..Default::default()
+        };
+
+        let my_mac = mac_address_by_name(interface_name)
+            .unwrap()
+            .unwrap()
+            .bytes();
+
+        release_payload.chaddr[0..6].copy_from_slice(&my_mac);
+
+        let mut dhcp_options: Vec<DhcpOption> = Vec::new();
+        dhcp_options.push(DhcpOption::DhcpMessageType(DhcpMessage::Release));
+        dhcp_options.push(DhcpOption::ClientId((1, my_mac)));
+        dhcp_options.push(DhcpOption::ServerId(server_ip));
+        dhcp_options.push(DhcpOption::End);
+
+        release_payload
+            .dhcp_options
+            .extend_from_slice(&DhcpOption::into_bytes(&dhcp_options));
+
+        release_payload
     }
 
     pub fn to_bytes(&self) -> Box<[u8]> {

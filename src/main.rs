@@ -3,10 +3,10 @@ mod error;
 mod netconfig_help;
 mod socket_help;
 
+use core::panic;
 use error::DhcpClientError;
 use etherparse::{PacketBuilder, SlicedPacket};
 use log::{error, info, warn};
-use core::panic;
 use std::{
     env::args,
     net::Ipv4Addr,
@@ -133,7 +133,8 @@ impl DhcpClient {
 
             let interface_name = args
                 .get(1)
-                .ok_or(error::DhcpClientError::MissingInterface).unwrap_or_else(|err| {
+                .ok_or(error::DhcpClientError::MissingInterface)
+                .unwrap_or_else(|err| {
                     error!("FATAL: {}", err);
                     std::process::exit(1);
                 });
@@ -260,7 +261,6 @@ impl DhcpClient {
             let raw_payload = dhcp_payload.to_bytes();
 
             let mut raw_packet = Vec::<u8>::with_capacity(packet_builder.size(raw_payload.len()));
-
             packet_builder.write(&mut raw_packet, &raw_payload)?;
 
             info!(target: "mydhcp::request", "- Sending the DHCP Request packet");
@@ -604,29 +604,50 @@ impl DhcpClient {
 
 impl Drop for DhcpClient {
     fn drop(&mut self) {
-        match self {
-            DhcpClient::Disconnected => { /* Nothing to clean up */ }
-            DhcpClient::Connected { .. } => { /* Nothing to clean up */ }
-            DhcpClient::Discovering { .. } => { /* Nothing to clean up */ }
-            DhcpClient::ReceivedOffer { .. } => { /* Nothing to clean up */ }
-            DhcpClient::Requesting { .. } => { /* Nothing to clean up */ }
-            DhcpClient::ReceivedAcknowledgment { .. } => { /* Nothing to clean up */ }
-            DhcpClient::Active { socket, .. } => {
-                // Full cleanup: reset IP, mask, gateway, DNS, and disable interface
-                if let Ok(netconfig) = NetConfigManager::new() {
-                    if let Err(e) = netconfig.cleanup(&socket.interface) {
-                        error!(
-                            "Failed to clean up network configuration for interface '{}' during drop: {}",
-                            socket.interface, e
-                        );
-                    } else {
-                        info!(
-                            "Cleaned up network configuration for interface '{}' during drop.",
-                            socket.interface
-                        );
-                    }
+        if let DhcpClient::Active {
+            socket,
+            ip,
+            server_ip,
+            transaction_id,
+            ..
+        } = self
+        { 
+            // Full cleanup: reset IP, mask, gateway, DNS, and disable interface
+            if let Ok(netconfig) = NetConfigManager::new() {
+                if let Err(e) = netconfig.cleanup(&socket.interface) {
+                    error!(
+                        "Failed to clean up network configuration for interface '{}' during drop: {}",
+                        socket.interface, e
+                    );
+                } else {
+                    info!(
+                        "Cleaned up network configuration for interface '{}' during drop.",
+                        socket.interface
+                    );
                 }
             }
+
+            let packet_builder = PacketBuilder::ethernet2(
+                socket.interface_mac_address,
+                [0xff, 0xff, 0xff, 0xff, 0xff, 0xff],
+            )
+            .ipv4(ip.octets(), server_ip.octets(), 10)
+            .udp(68, 67);
+
+            let dhcp_payload =
+                DhcpPayload::release(&socket.interface, *transaction_id, *ip, *server_ip);
+            let raw_payload = dhcp_payload.to_bytes();
+            
+            let mut raw_packet = Vec::<u8>::with_capacity(packet_builder.size(raw_payload.len()));
+            packet_builder.write(&mut raw_packet, &raw_payload).unwrap_or_else(|err| {
+                error!("Failed to write DHCP Release packet: {}", err);
+                std::process::exit(1);
+            });
+
+            socket.send_to(&raw_packet, &[0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8]).unwrap_or_else(|err| {
+                error!("Failed to send DHCP Release packet: {}", err);
+                std::process::exit(1);
+            });
         }
     }
 }
