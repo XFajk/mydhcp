@@ -354,10 +354,7 @@ impl NetConfigManager {
     }
 
     /// Cleans up network configuration by resetting IP, netmask, gateway, and DNS.
-    pub fn cleanup(&self, interface_name: &str) -> std::io::Result<()> {
-        self.set_ip(interface_name, Ipv4Addr::UNSPECIFIED)?;
-        self.set_mask(interface_name, Ipv4Addr::UNSPECIFIED)?;
-
+    pub fn cleanup(&self, interface_name: &str) -> std::io::Result<()> { 
         let interface_index = unsafe {
             libc::if_nametoindex(
                 CString::new(interface_name)

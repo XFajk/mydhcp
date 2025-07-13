@@ -511,16 +511,20 @@ impl DhcpClient {
     }
 
     fn keep_track(self) -> Result<Self, DhcpClientError> {
+        use std::mem::ManuallyDrop;
+        use std::ptr::drop_in_place;
+
+        let mut manual_self = ManuallyDrop::new(self);
         if let DhcpClient::Active {
-            ref socket,
+            ref mut socket,
             transaction_id,
             ip,
             server_ip,
-            ref acknowledged_options,
+            ref mut acknowledged_options,
             renewal_deadline,
             rebinding_deadline,
             expiration_deadline,
-        } = self
+        } = *manual_self
         {
             wait_until_with_abort(renewal_deadline)?;
             info!(target: "mydhcp::keep_track", "Resending a unicast DHCP Request packet to renew the lease");
@@ -536,7 +540,11 @@ impl DhcpClient {
 
             match new_client {
                 Ok(new_client) => {
-                    info!(target: "mydhcp::keep_track", "Lease renewed successfully.");
+                    info!(target: "mydhcp::keep_track", "Lease renewed successfully."); 
+                    unsafe {
+                        drop_in_place(socket);
+                        drop_in_place(acknowledged_options);
+                    }
                     return Ok(new_client);
                 }
                 Err(e) => {
@@ -558,7 +566,11 @@ impl DhcpClient {
 
             match new_client {
                 Ok(new_client) => {
-                    info!(target: "mydhcp::keep_track", "Lease renewed successfully.");
+                    info!(target: "mydhcp::keep_track", "Lease renewed successfully."); 
+                    unsafe {
+                        drop_in_place(socket);
+                        drop_in_place(acknowledged_options);
+                    }
                     return Ok(new_client);
                 }
                 Err(e) => {
@@ -568,20 +580,9 @@ impl DhcpClient {
 
             wait_until_with_abort(expiration_deadline)?;
             error!(target: "mydhcp::keep_track", "Lease expired, client is no longer active.");
-
-            let netconfig = NetConfigManager::new().unwrap_or_else(|err| {
-                error!("FATAL: failed to create NetConfigManager: {}", err);
-                panic!();
-            });
-
-            info!(target: "mydhcp::keep_track", "Cleaning up network configuration for interface '{}'", socket.interface);
-            netconfig.cleanup(&socket.interface).unwrap_or_else(|err| {
-                error!(
-                    "FATAL: failed to clean up interface '{}': {}",
-                    socket.interface, err
-                );
-                panic!();
-            });
+            unsafe {
+                ManuallyDrop::drop(&mut manual_self);
+            }
 
             Err(DhcpClientError::ExpiredLease)
         } else {
