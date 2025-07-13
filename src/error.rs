@@ -31,4 +31,8 @@ pub enum DhcpClientError {
     DhcpResponseOptionsMissingComponent(Box<str>),
     #[error("gateway list is empty")]
     GatewayListEmpty,
+    #[error("Expired lease, no renewal possible")]
+    ExpiredLease,
+    #[error("Shutting down gracefully due to signal")]
+    ShutdownSignalReceived,
 }

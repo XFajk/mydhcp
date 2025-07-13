@@ -24,13 +24,23 @@ static SHOULD_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 fn main() {
     env_logger::init();
 
-    // Clone the flag to move into the signal handler
     if let Err(e) = ctrlc::set_handler(|| {
         info!("SIGINT received! Setting shutdown flag. The process will shutdown gracefully soon");
         SHOULD_SHUTDOWN.store(true, Ordering::SeqCst);
     }) {
         error!("Failed to set Ctrl-C handler: {}", e);
-        std::process::exit(1);
+        panic!();
+    }
+
+    #[cfg(not(debug_assertions))]
+    {
+        std::panic::set_hook(Box::new(|_| {
+            eprintln!("process panicked");
+        }));
+
+        unsafe {
+            std::env::remove_var("RUST_BACKTRACE");
+        }
     }
 
     let args: Vec<String> = args().collect();
@@ -39,8 +49,16 @@ fn main() {
 
         let mut client = match client {
             Ok(client) => client,
+            Err(DhcpClientError::ShutdownSignalReceived) => {
+                println!("{}", DhcpClientError::ShutdownSignalReceived);
+                return;
+            }
             Err(e) => {
                 error!("Failed to establish DHCP connection: {}", e);
+                if let Err(e) = shutdown_on_signal() {
+                    println!("{}", e);
+                    return;
+                }
                 continue; // Retry on error
             }
         };
@@ -51,11 +69,15 @@ fn main() {
         while !SHOULD_SHUTDOWN.load(Ordering::SeqCst) {
             let possibly_new_client = client.keep_track();
             match possibly_new_client {
-                Some(new_client) => {
+                Ok(new_client) => {
                     client = new_client;
                     info!("DHCP lease renewed successfully.");
                 }
-                None => {
+                Err(DhcpClientError::ShutdownSignalReceived) => {
+                    println!("{}", DhcpClientError::ShutdownSignalReceived);
+                    return;
+                }
+                Err(_) => {
                     error!("DHCP lease expired or could not be renewed, reconnecting...");
                     break; // Exit the loop if lease cannot be renewed
                 }
@@ -127,7 +149,7 @@ impl DhcpClient {
     }
 
     fn connect(self, args: &[String]) -> Result<Self, DhcpClientError> {
-        shutdown_on_signal();
+        shutdown_on_signal()?;
         if let Self::Disconnected = self {
             info!(target: "mydhcp::connect", "Setting UP the DHCP Client");
 
@@ -136,7 +158,7 @@ impl DhcpClient {
                 .ok_or(error::DhcpClientError::MissingInterface)
                 .unwrap_or_else(|err| {
                     error!("FATAL: {}", err);
-                    std::process::exit(1);
+                    panic!();
                 });
 
             info!(target: "mydhcp::connect", "- Creating a Socket for DHCP comunication on interface: {}", interface_name);
@@ -150,7 +172,7 @@ impl DhcpClient {
     }
 
     fn discover(self) -> Result<Self, error::DhcpClientError> {
-        shutdown_on_signal();
+        shutdown_on_signal()?;
         if let Self::Connected { ref socket } = self {
             info!(target: "mydhcp::discover", "Preparing to send DHCP Discover packet");
             let transaction_id = std::time::SystemTime::now()
@@ -189,7 +211,7 @@ impl DhcpClient {
     }
 
     fn receive_offer(self) -> Result<Self, DhcpClientError> {
-        shutdown_on_signal();
+        shutdown_on_signal()?;
         if let Self::Discovering {
             ref socket,
             transaction_id,
@@ -238,7 +260,7 @@ impl DhcpClient {
     }
 
     fn request(self) -> Result<Self, DhcpClientError> {
-        shutdown_on_signal();
+        shutdown_on_signal()?;
         if let DhcpClient::ReceivedOffer {
             ref socket,
             transaction_id,
@@ -282,7 +304,7 @@ impl DhcpClient {
     }
 
     fn receive_acknowledgement(self) -> Result<Self, DhcpClientError> {
-        shutdown_on_signal();
+        shutdown_on_signal()?;
         if let DhcpClient::Requesting {
             ref socket,
             transaction_id,
@@ -330,7 +352,7 @@ impl DhcpClient {
         }
     }
     fn activate(self) -> Result<Self, DhcpClientError> {
-        shutdown_on_signal();
+        shutdown_on_signal()?;
         if let DhcpClient::ReceivedAcknowledgment {
             ref socket,
             transaction_id,
@@ -478,7 +500,7 @@ impl DhcpClient {
         }
     }
 
-    fn keep_track(self) -> Option<Self> {
+    fn keep_track(self) -> Result<Self, DhcpClientError> {
         if let DhcpClient::Active {
             ref socket,
             transaction_id,
@@ -490,7 +512,7 @@ impl DhcpClient {
             expiration_deadline,
         } = self
         {
-            wait_until_with_abort(renewal_deadline);
+            wait_until_with_abort(renewal_deadline)?;
             info!(target: "mydhcp::keep_track", "Resending a unicast DHCP Request packet to renew the lease");
 
             let new_client = DhcpClient::ReceivedOffer {
@@ -505,14 +527,14 @@ impl DhcpClient {
             match new_client {
                 Ok(new_client) => {
                     info!(target: "mydhcp::keep_track", "Lease renewed successfully.");
-                    return Some(new_client);
+                    return Ok(new_client);
                 }
                 Err(e) => {
                     warn!(target: "mydhcp::keep_track", "Failed to renew lease: {}", e);
                 }
             }
 
-            wait_until_with_abort(rebinding_deadline);
+            wait_until_with_abort(rebinding_deadline)?;
             info!(target: "mydhcp::keep_track", "Retring a broadcast DHCP Request packet to renew the lease");
 
             let new_client = DhcpClient::ReceivedOffer {
@@ -527,19 +549,19 @@ impl DhcpClient {
             match new_client {
                 Ok(new_client) => {
                     info!(target: "mydhcp::keep_track", "Lease renewed successfully.");
-                    return Some(new_client);
+                    return Ok(new_client);
                 }
                 Err(e) => {
                     warn!(target: "mydhcp::keep_track", "Failed to renew lease: {}", e);
                 }
             }
 
-            wait_until_with_abort(expiration_deadline);
+            wait_until_with_abort(expiration_deadline)?;
             error!(target: "mydhcp::keep_track", "Lease expired, client is no longer active.");
 
             let netconfig = NetConfigManager::new().unwrap_or_else(|err| {
                 error!("FATAL: failed to create NetConfigManager: {}", err);
-                std::process::exit(1);
+                panic!();
             });
 
             info!(target: "mydhcp::keep_track", "Cleaning up network configuration for interface '{}'", socket.interface);
@@ -548,13 +570,13 @@ impl DhcpClient {
                     "FATAL: failed to clean up interface '{}': {}",
                     socket.interface, err
                 );
-                std::process::exit(1);
+                panic!();
             });
 
-            None
+            Err(DhcpClientError::ExpiredLease)
         } else {
             error!(target: "mydhcp::keep_track", "Client is not in an active state, cannot keep track of lease.");
-            None
+            Err(DhcpClientError::DhcpInvalidState)
         }
     }
 }
@@ -604,6 +626,10 @@ impl DhcpClient {
 
 impl Drop for DhcpClient {
     fn drop(&mut self) {
+
+        #[cfg(debug_assertions)]
+        info!(target: "mydhcp::drop", "Freeing the DHCP Client");
+
         if let DhcpClient::Active {
             socket,
             ip,
@@ -611,8 +637,7 @@ impl Drop for DhcpClient {
             transaction_id,
             ..
         } = self
-        { 
-            // Full cleanup: reset IP, mask, gateway, DNS, and disable interface
+        {
             if let Ok(netconfig) = NetConfigManager::new() {
                 if let Err(e) = netconfig.cleanup(&socket.interface) {
                     error!(
@@ -637,17 +662,24 @@ impl Drop for DhcpClient {
             let dhcp_payload =
                 DhcpPayload::release(&socket.interface, *transaction_id, *ip, *server_ip);
             let raw_payload = dhcp_payload.to_bytes();
-            
-            let mut raw_packet = Vec::<u8>::with_capacity(packet_builder.size(raw_payload.len()));
-            packet_builder.write(&mut raw_packet, &raw_payload).unwrap_or_else(|err| {
-                error!("Failed to write DHCP Release packet: {}", err);
-                std::process::exit(1);
-            });
 
-            socket.send_to(&raw_packet, &[0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8]).unwrap_or_else(|err| {
-                error!("Failed to send DHCP Release packet: {}", err);
-                std::process::exit(1);
-            });
+            let mut raw_packet = Vec::<u8>::with_capacity(packet_builder.size(raw_payload.len()));
+            packet_builder
+                .write(&mut raw_packet, &raw_payload)
+                .unwrap_or_else(|err| {
+                    error!("Failed to write DHCP Release packet: {}", err);
+                    panic!()
+                });
+
+            socket
+                .send_to(
+                    &raw_packet,
+                    &[0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8, 0xffu8],
+                )
+                .unwrap_or_else(|err| {
+                    error!("Failed to send DHCP Release packet: {}", err);
+                    panic!();
+                });
         }
     }
 }
@@ -699,20 +731,23 @@ fn combine_dhcp_options(
     result.into()
 }
 
-fn wait_until_with_abort(deadline: std::time::Instant) {
+fn wait_until_with_abort(deadline: std::time::Instant) -> Result<(), DhcpClientError> {
     use std::time::*;
 
     const POLL_INTERVAL: Duration = Duration::from_secs(1);
 
     while Instant::now() < deadline {
-        shutdown_on_signal();
+        shutdown_on_signal()?;
         std::thread::sleep(POLL_INTERVAL);
     }
+
+    Ok(())
 }
 
-fn shutdown_on_signal() {
+fn shutdown_on_signal() -> Result<(), DhcpClientError> {
     if SHOULD_SHUTDOWN.load(Ordering::SeqCst) {
-        info!("Shutdown signal received, exiting gracefully.");
-        std::process::exit(0);
+        Err(DhcpClientError::ShutdownSignalReceived)
+    } else {
+        Ok(())
     }
 }
