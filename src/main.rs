@@ -381,49 +381,57 @@ impl DhcpClient {
             let mask = match acknowledged_options
                 .iter()
                 .find(|x| matches!(x, DhcpOption::SubnetMask(_)))
-                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-                    "Subnet Mask".into(),
-                ))? {
-                DhcpOption::SubnetMask(mask) => *mask,
+            {
+                Some(DhcpOption::SubnetMask(mask)) => Some(*mask),
+                None => None,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
             };
-            info!(target: "mydhcp::activate", "- Subnet Mask: {}", mask);
+            if let Some(mask) = mask {
+                info!(target: "mydhcp::activate", "- Subnet Mask: {}", mask);
+            } else {
+                warn!(target: "mydhcp::activate", "- Missing a Subnet Mask");
+            }
 
             let dns_servers = match acknowledged_options
                 .iter()
                 .find(|x| matches!(x, DhcpOption::DomainNameServer(_)))
-                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-                    "Domain Name Server List".into(),
-                ))? {
-                DhcpOption::DomainNameServer(servers) => Rc::clone(servers),
+            {
+                Some(DhcpOption::DomainNameServer(servers)) => Some(Rc::clone(servers)),
+                None => None,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
             };
-            info!(target: "mydhcp::activate", "- DNS Servers: {:?}", dns_servers);
+            if let Some(dns_servers) = &dns_servers {
+                info!(target: "mydhcp::activate", "- DNS Servers: {:?}", dns_servers);
+            } else {
+                warn!(target: "mydhcp::activate", "- Missing DNS Servers");
+            }
 
             let gateways = match acknowledged_options
                 .iter()
                 .find(|x| matches!(x, DhcpOption::Gateway(_)))
-                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-                    "Gateway List".into(),
-                ))? {
-                DhcpOption::Gateway(gates) => Rc::clone(gates),
+            {
+                Some(DhcpOption::Gateway(gates)) => Some(Rc::clone(gates)),
+                None => None,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
             };
-            info!(target: "mydhcp::activate", "- Gateways: {:?}", gateways);
+            if let Some(gateways) = &gateways {
+                info!(target: "mydhcp::activate", "- Gateways: {:?}", gateways);
+            } else {
+                warn!(target: "mydhcp::activate", "- Missing Gateways");
+            }
 
             let lease_time = match acknowledged_options
                 .iter()
                 .find(|x| matches!(x, DhcpOption::IpAddressLeaseTime(_)))
-                .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
-                    "IP Address Lease Time".into(),
-                ))? {
-                DhcpOption::IpAddressLeaseTime(t) => *t,
+            {
+                Some(DhcpOption::IpAddressLeaseTime(t)) => *t,
+                None => 500,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
@@ -440,9 +448,7 @@ impl DhcpClient {
                     *val
                 }
                 _ => {
-                    warn!(
-                        "T1 (Renewal Time) not provided by server, using default (50% of lease time)"
-                    );
+                    warn!(target: "mydhcp::activate", "- T1 (Renewal Time) not provided by server, using default (50% of lease time)");
                     lease_time / 2
                 }
             };
@@ -456,9 +462,7 @@ impl DhcpClient {
                     *val
                 }
                 _ => {
-                    warn!(
-                        "T2 (Rebinding Time) not provided by server, using default (87.5% of lease time)"
-                    );
+                    warn!(target: "mydhcp::activate", "- T2 (Rebinding Time) not provided by server, using default (87.5% of lease time)");
                     (lease_time as f64 * 0.875) as u32
                 }
             };
@@ -474,15 +478,21 @@ impl DhcpClient {
             info!(target: "mydhcp::activate", "- Configuring the network with the received options");
             let netconfig = NetConfigManager::new()?;
             netconfig.set_ip(&socket.interface, ip)?;
-            netconfig.set_mask(&socket.interface, mask)?;
-            netconfig.set_gateway(
-                &socket.interface,
-                gateways
-                    .get(0)
-                    .ok_or(DhcpClientError::GatewayListEmpty)?
-                    .clone(),
-            )?;
-            netconfig.set_dns(&dns_servers)?;
+            if let Some(mask) = mask {
+                netconfig.set_mask(&socket.interface, mask)?;
+            }
+            if let Some(gateways) = gateways {
+                netconfig.set_gateway(
+                    &socket.interface,
+                    gateways
+                        .get(0)
+                        .ok_or(DhcpClientError::GatewayListEmpty)?
+                        .clone(),
+                )?;
+            }
+            if let Some(dns_servers) = dns_servers {
+                netconfig.set_dns(&dns_servers)?;
+            }
             netconfig.enable(&socket.interface)?;
 
             Ok(DhcpClient::Active {
@@ -626,7 +636,6 @@ impl DhcpClient {
 
 impl Drop for DhcpClient {
     fn drop(&mut self) {
-
         #[cfg(debug_assertions)]
         info!(target: "mydhcp::drop", "Freeing the DHCP Client");
 
