@@ -526,7 +526,14 @@ impl DhcpClient {
             expiration_deadline,
         } = *manual_self
         {
-            wait_until_with_abort(renewal_deadline)?;
+            let shutdown_result = wait_until_with_abort(renewal_deadline);
+            if let Err(e) = shutdown_result {
+                unsafe {
+                    ManuallyDrop::drop(&mut manual_self);
+                }
+                return Err(e);
+            }
+
             info!(target: "mydhcp::keep_track", "Resending a unicast DHCP Request packet to renew the lease");
 
             let new_client = DhcpClient::ReceivedOffer {
@@ -552,7 +559,13 @@ impl DhcpClient {
                 }
             }
 
-            wait_until_with_abort(rebinding_deadline)?;
+            let shutdown_result = wait_until_with_abort(rebinding_deadline);
+            if let Err(e) = shutdown_result {
+                unsafe {
+                    ManuallyDrop::drop(&mut manual_self);
+                }
+                return Err(e);
+            }
             info!(target: "mydhcp::keep_track", "Retring a broadcast DHCP Request packet to renew the lease");
 
             let new_client = DhcpClient::ReceivedOffer {
@@ -578,7 +591,13 @@ impl DhcpClient {
                 }
             }
 
-            wait_until_with_abort(expiration_deadline)?;
+            let shutdown_result = wait_until_with_abort(expiration_deadline);
+            if let Err(e) = shutdown_result {
+                unsafe {
+                    ManuallyDrop::drop(&mut manual_self);
+                }
+                return Err(e);
+            }
             error!(target: "mydhcp::keep_track", "Lease expired, client is no longer active.");
             unsafe {
                 ManuallyDrop::drop(&mut manual_self);
@@ -619,6 +638,7 @@ impl DhcpClient {
         let elapsed_time = std::time::Instant::now();
 
         while elapsed_time.elapsed() < time_out {
+            shutdown_on_signal()?;
             let (data, _) = socket.recv_from()?;
             let data = Rc::from(data);
 
@@ -661,6 +681,8 @@ impl Drop for DhcpClient {
                     );
                 }
             }
+
+            info!(target: "mydhcp::drop", "Sending DHCP Release packet");
 
             let packet_builder = PacketBuilder::ethernet2(
                 socket.interface_mac_address,
