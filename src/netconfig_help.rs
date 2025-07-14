@@ -84,7 +84,7 @@ impl NetConfigManager {
     }
 
     pub fn set_ip(&self, interface_name: &str, ip: Ipv4Addr) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::set_ip", "Setting IP address {} for interface {}", ip, interface_name);
+        info!(target: "mydhcp::netconfig::set_ip", "-- Setting IP address {} for interface {}", ip, interface_name);
         let interface_name = CString::new(interface_name)?;
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
@@ -123,7 +123,7 @@ impl NetConfigManager {
     }
 
     pub fn set_mask(&self, interface_name: &str, mask: Ipv4Addr) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::set_mask", "Setting netmask {} for interface {}", mask, interface_name);
+        info!(target: "mydhcp::netconfig::set_mask", "-- Setting netmask {} for interface {}", mask, interface_name);
         let interface_name = CString::new(interface_name)?;
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
@@ -166,44 +166,8 @@ impl NetConfigManager {
         Ok(())
     }
 
-    pub fn enable(&self, interface_name: &str) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::enable", "Enabling interface {}", interface_name);
-        let interface_name = CString::new(interface_name)?;
-
-        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
-        let name_bytes = interface_name.as_bytes_with_nul();
-
-        if name_bytes.len() > ifr.ifr_name.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "interface name too long",
-            ));
-        }
-
-        ifr.ifr_name[..name_bytes.len()].copy_from_slice(&name_bytes);
-
-        let res = unsafe { ioctl(self.control_socket, libc::SIOCGIFFLAGS, &mut ifr as *mut _) };
-        if res < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        unsafe {
-            // ifr_ifru is a union, so access as flags
-            let flags_ptr = &mut ifr.ifr_ifru as *mut _ as *mut libc::c_short;
-            *flags_ptr |= libc::IFF_UP as libc::c_short;
-        }
-
-        // Set the flags back
-        let res = unsafe { ioctl(self.control_socket, libc::SIOCSIFFLAGS, &mut ifr as *mut _) };
-        if res < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        Ok(())
-    }
-
     pub fn set_gateway(&self, interface_name: &str, gateway: Ipv4Addr) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::set_gateway", "Setting gateway {} for interface {}", gateway, interface_name);
+        info!(target: "mydhcp::netconfig::set_gateway", "-- Setting gateway {} for interface {}", gateway, interface_name);
 
         // the reason why I dont pass a index right a way and derive becaue I think it is safer and more inline with the rest of the methods
         // the fact is cheking if the index is valid would require the same amount of code but it would not be inline so that is why I decied to put a
@@ -219,11 +183,12 @@ impl NetConfigManager {
             return Err(std::io::Error::last_os_error().into());
         }
 
+        info!(target: "mydhcp::netconfig::set_gateway", "--- Building the Netlink frame to set the gatway");
         let mut header: libc::nlmsghdr = libc::nlmsghdr {
             nlmsg_len: 0,
             nlmsg_type: libc::RTM_NEWROUTE,
             nlmsg_seq: 1,
-            nlmsg_flags: (libc::NLM_F_REQUEST | libc::NLM_F_CREATE | libc::NLM_F_EXCL) as u16,
+            nlmsg_flags: (libc::NLM_F_REQUEST | libc::NLM_F_CREATE | libc::NLM_F_REPLACE) as u16,
             nlmsg_pid: 0,
         };
 
@@ -265,6 +230,7 @@ impl NetConfigManager {
             buffer.extend_from_slice(&interface_index.to_be_bytes());
         }
 
+        info!(target: "mydhcp::netconfig::set_gateway", "--- Sending the Netlink frame to set the gatway");
         let operaton_result = unsafe {
             libc::send(
                 self.netlink_socket,
@@ -280,6 +246,7 @@ impl NetConfigManager {
 
         let mut buffer: [u8; 1024] = [0; 1024];
 
+        info!(target: "mydhcp::netconfig::set_gateway", "--- Reciving a Netlink ACK frame to check if the operation was a success");
         let operation_result = unsafe {
             libc::recv(
                 self.netlink_socket,
@@ -322,40 +289,6 @@ impl NetConfigManager {
 
         for addr in dns_servers[..length].iter() {
             dns_file.write_all(format!("nameserver {}\n", addr).as_bytes())?;
-        }
-
-        Ok(())
-    }
-
-    pub fn disable(&self, interface_name: &str) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::disable", "Disabling interface {}", interface_name);
-        let interface_name = CString::new(interface_name)?;
-
-        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
-        let name_bytes = interface_name.as_bytes_with_nul();
-
-        if name_bytes.len() > ifr.ifr_name.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "interface name too long",
-            ));
-        }
-
-        ifr.ifr_name[..name_bytes.len()].copy_from_slice(&name_bytes);
-
-        let res = unsafe { ioctl(self.control_socket, libc::SIOCGIFFLAGS, &mut ifr as *mut _) };
-        if res < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        unsafe {
-            let flags_ptr = &mut ifr.ifr_ifru as *mut _ as *mut libc::c_short;
-            *flags_ptr &= !(libc::IFF_UP as libc::c_short);
-        }
-
-        let res = unsafe { ioctl(self.control_socket, libc::SIOCSIFFLAGS, &mut ifr as *mut _) };
-        if res < 0 {
-            return Err(std::io::Error::last_os_error());
         }
 
         Ok(())
@@ -467,8 +400,6 @@ impl NetConfigManager {
         }
 
         let _ = std::fs::File::create("/etc/resolv.conf")?;
-
-        self.disable(interface_name)?;
 
         Ok(())
     }

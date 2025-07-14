@@ -485,7 +485,7 @@ impl DhcpClient {
                 netconfig.set_gateway(
                     &socket.interface,
                     gateways
-                        .get(0)
+                        .first()
                         .ok_or(DhcpClientError::GatewayListEmpty)?
                         .clone(),
                 )?;
@@ -493,7 +493,6 @@ impl DhcpClient {
             if let Some(dns_servers) = dns_servers {
                 netconfig.set_dns(&dns_servers)?;
             }
-            netconfig.enable(&socket.interface)?;
 
             Ok(DhcpClient::Active {
                 socket: Rc::clone(socket),
