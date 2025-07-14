@@ -1,6 +1,6 @@
 use libc::{AF_INET, AF_NETLINK, ioctl};
 use libc::{SO_RCVTIMEO, SOL_SOCKET, setsockopt, timeval};
-use log::info;
+use log::{info, error};
 use std::time::Duration;
 use std::{
     ffi::{CString, c_void},
@@ -36,11 +36,15 @@ struct RtAttr {
 pub struct NetConfigManager {
     netlink_socket: RawFd,
     control_socket: RawFd,
+    interface_name: Box<str>,
+    ip: Option<Ipv4Addr>,
+    mask: Option<Ipv4Addr>,
+    gateway: Option<Ipv4Addr>,
 }
 
 impl NetConfigManager {
     /// Creates a new NetConfigManager by opening a netlink socket.
-    pub fn new() -> std::io::Result<Self> {
+    pub fn new(interface_name: &str) -> std::io::Result<Self> {
         let netlink_socket =
             unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE) };
 
@@ -82,12 +86,16 @@ impl NetConfigManager {
         Ok(NetConfigManager {
             netlink_socket,
             control_socket,
+            interface_name: interface_name.into(),
+            ip: None,
+            mask: None,
+            gateway: None,
         })
     }
 
-    pub fn set_ip(&self, interface_name: &str, ip: Ipv4Addr) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::set_ip", "-- Setting IP address {} for interface {}", ip, interface_name);
-        let interface_name = CString::new(interface_name)?;
+    pub fn set_ip(&mut self, ip: Ipv4Addr) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::set_ip", "-- Setting IP address {} for interface {}", ip, self.interface_name);
+        let interface_name = CString::new(self.interface_name.as_ref())?;
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         let name_bytes = interface_name.as_bytes_with_nul();
@@ -121,12 +129,14 @@ impl NetConfigManager {
             return Err(std::io::Error::last_os_error());
         }
 
+        self.ip = Some(ip);
         Ok(())
     }
 
-    pub fn set_mask(&self, interface_name: &str, mask: Ipv4Addr) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::set_mask", "-- Setting netmask {} for interface {}", mask, interface_name);
-        let interface_name = CString::new(interface_name)?;
+    pub fn set_mask(&mut self, mask: Ipv4Addr) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::set_mask", "-- Setting netmask {} for interface {}", mask, self.interface_name);
+        let interface_name = CString::new(self.interface_name.as_ref())?;
+
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         let name_bytes = interface_name.as_bytes_with_nul();
@@ -165,18 +175,19 @@ impl NetConfigManager {
             return Err(std::io::Error::last_os_error());
         }
 
+        self.mask = Some(mask);
         Ok(())
     }
 
-    pub fn set_gateway(&self, interface_name: &str, gateway: Ipv4Addr) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::set_gateway", "-- Setting gateway {} for interface {}", gateway, interface_name);
+    pub fn set_gateway(&mut self, gateway: Ipv4Addr) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::set_gateway", "-- Setting gateway {} for interface {}", gateway, self.interface_name);
 
         // the reason why I dont pass a index right a way and derive becaue I think it is safer and more inline with the rest of the methods
         // the fact is cheking if the index is valid would require the same amount of code but it would not be inline so that is why I decied to put a
         // interface name as a parameter
         let interface_index = unsafe {
             libc::if_nametoindex(
-                CString::new(interface_name)
+                CString::new(self.interface_name.as_ref())
                     .map_err(|err| std::io::Error::from(err))?
                     .as_ptr(),
             )
@@ -211,17 +222,25 @@ impl NetConfigManager {
             rta_type: libc::RTA_GATEWAY,
         };
 
+        let gateway_addr = u32::from(gateway);
+
         let interface_attribute: RtAttr = RtAttr {
             rta_len: (size_of::<RtAttr>() + 4) as u16,
             rta_type: libc::RTA_OIF,
         };
 
-        let gateway_addr = u32::from(gateway);
+        let dst_attribute = RtAttr {
+            rta_len: (size_of::<RtAttr>() + 4) as u16,
+            rta_type: libc::RTA_DST,
+        };
 
-        let mut buffer: Vec<u8> = Vec::with_capacity(
-            size_of_val(&header) + size_of_val(&message) + size_of::<RtAttr>() * 2 + 8, // these 8 bytes are for the added gatway address and intreface index
-        );
-        header.nlmsg_len = buffer.capacity() as u32;
+        let dst_addr = u32::from(Ipv4Addr::UNSPECIFIED);
+
+        let message_length =
+            size_of_val(&header) + size_of_val(&message) + size_of::<RtAttr>() * 3 + 12; // these 12 bytes are for the added gatway address, interface index and destination address
+
+        let mut buffer: Vec<u8> = Vec::with_capacity(message_length);
+        header.nlmsg_len = message_length as u32;
 
         unsafe {
             buffer.extend_from_slice(&struct_as_bytes(&header));
@@ -230,6 +249,8 @@ impl NetConfigManager {
             buffer.extend_from_slice(&gateway_addr.to_be_bytes());
             buffer.extend_from_slice(&struct_as_bytes(&interface_attribute));
             buffer.extend_from_slice(&interface_index.to_be_bytes());
+            buffer.extend_from_slice(&struct_as_bytes(&dst_attribute));
+            buffer.extend_from_slice(&dst_addr.to_be_bytes());
         }
 
         info!(target: "mydhcp::netconfig::set_gateway", "--- Sending the Netlink frame to set the gatway");
@@ -285,6 +306,7 @@ impl NetConfigManager {
             return Err(std::io::Error::from_raw_os_error(ack_message.error));
         }
 
+        self.gateway = Some(gateway);
         Ok(())
     }
 
@@ -302,10 +324,19 @@ impl NetConfigManager {
     }
 
     /// Cleans up network configuration by resetting IP, netmask, gateway, and DNS.
-    pub fn cleanup(&self, interface_name: &str) -> std::io::Result<()> {
+    pub fn cleanup(&mut self) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::cleanup", "-- Cleaning up network configuration for interface {}", self.interface_name);
+
+        let _ = std::fs::File::create("/etc/resolv.conf")?;
+
+        if let None = self.gateway {
+            info!(target: "mydhcp::netconfig::cleanup", "--- No gateway set, skipping gateway removal");
+            return Ok(());
+        }
+
         let interface_index = unsafe {
             libc::if_nametoindex(
-                CString::new(interface_name)
+                CString::new(self.interface_name.as_ref())
                     .map_err(|err| std::io::Error::from(err))?
                     .as_ptr(),
             )
@@ -334,6 +365,13 @@ impl NetConfigManager {
             rtm_flags: 0u32,
         };
 
+        let gateway_attribute: RtAttr = RtAttr {
+            rta_len: (size_of::<RtAttr>() + 4) as u16,
+            rta_type: libc::RTA_GATEWAY,
+        };
+
+        let gateway_addr = u32::from(self.gateway.unwrap()); // safe unwrap because we check if gateway is set at the start of the cleanup 
+
         let dst_attribute = RtAttr {
             rta_len: (size_of::<RtAttr>() + 4) as u16,
             rta_type: libc::RTA_DST,
@@ -346,10 +384,11 @@ impl NetConfigManager {
             rta_type: libc::RTA_OIF,
         };
 
-        let mut buffer: Vec<u8> = Vec::with_capacity(
-            size_of_val(&header) + size_of_val(&message) + size_of::<RtAttr>() * 2 + 8, // these 8 bytes are for the added interface index and destination address
-        );
-        header.nlmsg_len = buffer.capacity() as u32;
+        let message_length =
+            size_of_val(&header) + size_of_val(&message) + size_of::<RtAttr>() * 3 + 12; // these 12 bytes are for the added gateway address, interface index and destination address
+
+        let mut buffer: Vec<u8> = Vec::with_capacity(message_length);
+        header.nlmsg_len = message_length as u32;
 
         unsafe {
             buffer.extend_from_slice(&struct_as_bytes(&header));
@@ -358,6 +397,8 @@ impl NetConfigManager {
             buffer.extend_from_slice(&dst_addr.to_be_bytes());
             buffer.extend_from_slice(&struct_as_bytes(&interface_attribute));
             buffer.extend_from_slice(&interface_index.to_be_bytes());
+            buffer.extend_from_slice(&struct_as_bytes(&gateway_attribute));
+            buffer.extend_from_slice(&gateway_addr.to_be_bytes());
         }
 
         let operaton_result = unsafe {
@@ -411,7 +452,7 @@ impl NetConfigManager {
             return Err(std::io::Error::from_raw_os_error(ack_message.error));
         }
 
-        let _ = std::fs::File::create("/etc/resolv.conf")?;
+        self.gateway = None;
 
         Ok(())
     }
@@ -420,6 +461,13 @@ impl NetConfigManager {
 impl Drop for NetConfigManager {
     fn drop(&mut self) {
         unsafe {
+
+            if let Err(e) = self.cleanup() {
+                error!(
+                    "Failed to clean up network configuration for interface '{}': {}",
+                    self.interface_name, e
+                );
+            }
             libc::close(self.control_socket);
             libc::close(self.netlink_socket);
         }

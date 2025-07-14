@@ -122,6 +122,7 @@ enum DhcpClient {
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
+        net_config: NetConfigManager,
         acknowledged_options: Rc<[DhcpOption]>,
         renewal_deadline: std::time::Instant,
         rebinding_deadline: std::time::Instant,
@@ -476,14 +477,13 @@ impl DhcpClient {
             let expiration_deadline = now + lease_time;
 
             info!(target: "mydhcp::activate", "- Configuring the network with the received options");
-            let netconfig = NetConfigManager::new()?;
-            netconfig.set_ip(&socket.interface, ip)?;
+            let mut net_config = NetConfigManager::new(&socket.interface)?;
+            net_config.set_ip(ip)?;
             if let Some(mask) = mask {
-                netconfig.set_mask(&socket.interface, mask)?;
+                net_config.set_mask(mask)?;
             }
             if let Some(gateways) = gateways {
-                netconfig.set_gateway(
-                    &socket.interface,
+                net_config.set_gateway(
                     gateways
                         .first()
                         .ok_or(DhcpClientError::GatewayListEmpty)?
@@ -491,7 +491,7 @@ impl DhcpClient {
                 )?;
             }
             if let Some(dns_servers) = dns_servers {
-                netconfig.set_dns(&dns_servers)?;
+                net_config.set_dns(&dns_servers)?;
             }
 
             Ok(DhcpClient::Active {
@@ -499,6 +499,7 @@ impl DhcpClient {
                 transaction_id,
                 ip,
                 server_ip,
+                net_config,
                 acknowledged_options: Rc::clone(acknowledged_options),
                 renewal_deadline,
                 rebinding_deadline,
@@ -519,6 +520,7 @@ impl DhcpClient {
             transaction_id,
             ip,
             server_ip,
+            ref mut net_config,
             ref mut acknowledged_options,
             renewal_deadline,
             rebinding_deadline,
@@ -546,10 +548,11 @@ impl DhcpClient {
 
             match new_client {
                 Ok(new_client) => {
-                    info!(target: "mydhcp::keep_track", "Lease renewed successfully."); 
+                    info!(target: "mydhcp::keep_track", "Lease renewed successfully.");
                     unsafe {
                         drop_in_place(socket);
                         drop_in_place(acknowledged_options);
+                        drop_in_place(net_config);
                     }
                     return Ok(new_client);
                 }
@@ -578,10 +581,11 @@ impl DhcpClient {
 
             match new_client {
                 Ok(new_client) => {
-                    info!(target: "mydhcp::keep_track", "Lease renewed successfully."); 
+                    info!(target: "mydhcp::keep_track", "Lease renewed successfully.");
                     unsafe {
                         drop_in_place(socket);
                         drop_in_place(acknowledged_options);
+                        drop_in_place(net_config);
                     }
                     return Ok(new_client);
                 }
@@ -666,21 +670,7 @@ impl Drop for DhcpClient {
             transaction_id,
             ..
         } = self
-        {
-            if let Ok(netconfig) = NetConfigManager::new() {
-                if let Err(e) = netconfig.cleanup(&socket.interface) {
-                    error!(
-                        "Failed to clean up network configuration for interface '{}' during drop: {}",
-                        socket.interface, e
-                    );
-                } else {
-                    info!(
-                        "Cleaned up network configuration for interface '{}' during drop.",
-                        socket.interface
-                    );
-                }
-            }
-
+        { 
             info!(target: "mydhcp::drop", "Sending DHCP Release packet");
 
             let packet_builder = PacketBuilder::ethernet2(
