@@ -304,7 +304,7 @@ impl NetConfigManager {
         }
 
         let ack_message: libc::nlmsgerr = unsafe {
-            bytes_as_struct(&buffer[size_of::<libc::nlmsghdr>()..size_of::<libc::nlmsgerr>()])
+            bytes_as_struct(&buffer[size_of::<libc::nlmsghdr>()..(size_of::<libc::nlmsgerr>()+size_of::<libc::nlmsghdr>())])
         };
 
         if ack_message.error != 0 {
@@ -459,7 +459,7 @@ impl NetConfigManager {
         }
 
         let ack_message: libc::nlmsgerr = unsafe {
-            bytes_as_struct(&buffer[size_of::<libc::nlmsghdr>()..size_of::<libc::nlmsgerr>()])
+            bytes_as_struct(&buffer[size_of::<libc::nlmsghdr>()..(size_of::<libc::nlmsgerr>()+size_of::<libc::nlmsghdr>())])
         };
 
         if ack_message.error != 0 {
