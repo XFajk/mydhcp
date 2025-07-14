@@ -1,4 +1,5 @@
 use libc::{AF_INET, AF_NETLINK, ioctl};
+use log::info;
 use std::{
     ffi::{CString, c_void},
     io::Write,
@@ -83,6 +84,7 @@ impl NetConfigManager {
     }
 
     pub fn set_ip(&self, interface_name: &str, ip: Ipv4Addr) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::set_ip", "Setting IP address {} for interface {}", ip, interface_name);
         let interface_name = CString::new(interface_name)?;
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
@@ -121,6 +123,7 @@ impl NetConfigManager {
     }
 
     pub fn set_mask(&self, interface_name: &str, mask: Ipv4Addr) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::set_mask", "Setting netmask {} for interface {}", mask, interface_name);
         let interface_name = CString::new(interface_name)?;
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
@@ -164,6 +167,7 @@ impl NetConfigManager {
     }
 
     pub fn enable(&self, interface_name: &str) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::enable", "Enabling interface {}", interface_name);
         let interface_name = CString::new(interface_name)?;
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
@@ -199,6 +203,8 @@ impl NetConfigManager {
     }
 
     pub fn set_gateway(&self, interface_name: &str, gateway: Ipv4Addr) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::set_gateway", "Setting gateway {} for interface {}", gateway, interface_name);
+
         // the reason why I dont pass a index right a way and derive becaue I think it is safer and more inline with the rest of the methods
         // the fact is cheking if the index is valid would require the same amount of code but it would not be inline so that is why I decied to put a
         // interface name as a parameter
@@ -308,12 +314,13 @@ impl NetConfigManager {
         Ok(())
     }
 
-    pub fn set_dns(&self, dns: &[Ipv4Addr]) -> std::io::Result<()> {
+    pub fn set_dns(&self, dns_servers: &[Ipv4Addr]) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::set_dns", "Setting DNS servers {:?} in the /etc/resolv.conf", dns_servers);
         let mut dns_file = std::fs::File::create("/etc/resolv.conf")?;
 
-        let lenght = 3.min(dns.len());
+        let length = 3.min(dns_servers.len());
 
-        for addr in dns[..lenght].iter() {
+        for addr in dns_servers[..length].iter() {
             dns_file.write_all(format!("nameserver {}\n", addr).as_bytes())?;
         }
 
@@ -321,6 +328,7 @@ impl NetConfigManager {
     }
 
     pub fn disable(&self, interface_name: &str) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::disable", "Disabling interface {}", interface_name);
         let interface_name = CString::new(interface_name)?;
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
