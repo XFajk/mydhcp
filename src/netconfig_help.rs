@@ -249,7 +249,7 @@ impl NetConfigManager {
         let mut buffer: [u8; 1024] = [0; 1024];
 
         info!(target: "mydhcp::netconfig::set_gateway", "--- Reciving a Netlink ACK frame to check if the operation was a success");
-        set_socket_timeout(self.netlink_socket, Duration::from_secs(2))?;
+        let _ = set_socket_timeout(self.netlink_socket, Duration::from_secs(2));
         let operation_result = unsafe {
             libc::recv(
                 self.netlink_socket,
@@ -258,7 +258,7 @@ impl NetConfigManager {
                 0,
             )
         };
-        clear_socket_timeout(self.netlink_socket)?;
+        let _ = clear_socket_timeout(self.netlink_socket);
 
         if operation_result < 0 {
             return Err(std::io::Error::last_os_error());
@@ -375,7 +375,7 @@ impl NetConfigManager {
 
         let mut buffer: [u8; 1024] = [0; 1024];
 
-        set_socket_timeout(self.netlink_socket, Duration::from_secs(2))?;
+        let _ = set_socket_timeout(self.netlink_socket, Duration::from_secs(2));
         let operation_result = unsafe {
             libc::recv(
                 self.netlink_socket,
@@ -384,7 +384,7 @@ impl NetConfigManager {
                 0,
             )
         };
-        clear_socket_timeout(self.netlink_socket)?;
+        let _ = clear_socket_timeout(self.netlink_socket);
 
         if operation_result < 0 {
             return Err(std::io::Error::last_os_error());
