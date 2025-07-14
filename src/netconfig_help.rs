@@ -1,5 +1,7 @@
 use libc::{AF_INET, AF_NETLINK, ioctl};
+use libc::{SO_RCVTIMEO, SOL_SOCKET, setsockopt, timeval};
 use log::info;
+use std::time::Duration;
 use std::{
     ffi::{CString, c_void},
     io::Write,
@@ -247,6 +249,7 @@ impl NetConfigManager {
         let mut buffer: [u8; 1024] = [0; 1024];
 
         info!(target: "mydhcp::netconfig::set_gateway", "--- Reciving a Netlink ACK frame to check if the operation was a success");
+        set_socket_timeout(self.netlink_socket, Duration::from_secs(2))?;
         let operation_result = unsafe {
             libc::recv(
                 self.netlink_socket,
@@ -255,6 +258,7 @@ impl NetConfigManager {
                 0,
             )
         };
+        clear_socket_timeout(self.netlink_socket)?;
 
         if operation_result < 0 {
             return Err(std::io::Error::last_os_error());
@@ -271,7 +275,10 @@ impl NetConfigManager {
         }
 
         let ack_message: libc::nlmsgerr = unsafe {
-            bytes_as_struct(&buffer[size_of::<libc::nlmsghdr>()..(size_of::<libc::nlmsgerr>()+size_of::<libc::nlmsghdr>())])
+            bytes_as_struct(
+                &buffer[size_of::<libc::nlmsghdr>()
+                    ..(size_of::<libc::nlmsgerr>() + size_of::<libc::nlmsghdr>())],
+            )
         };
 
         if ack_message.error != 0 {
@@ -295,7 +302,7 @@ impl NetConfigManager {
     }
 
     /// Cleans up network configuration by resetting IP, netmask, gateway, and DNS.
-    pub fn cleanup(&self, interface_name: &str) -> std::io::Result<()> { 
+    pub fn cleanup(&self, interface_name: &str) -> std::io::Result<()> {
         let interface_index = unsafe {
             libc::if_nametoindex(
                 CString::new(interface_name)
@@ -368,6 +375,7 @@ impl NetConfigManager {
 
         let mut buffer: [u8; 1024] = [0; 1024];
 
+        set_socket_timeout(self.netlink_socket, Duration::from_secs(2))?;
         let operation_result = unsafe {
             libc::recv(
                 self.netlink_socket,
@@ -376,6 +384,7 @@ impl NetConfigManager {
                 0,
             )
         };
+        clear_socket_timeout(self.netlink_socket)?;
 
         if operation_result < 0 {
             return Err(std::io::Error::last_os_error());
@@ -392,7 +401,10 @@ impl NetConfigManager {
         }
 
         let ack_message: libc::nlmsgerr = unsafe {
-            bytes_as_struct(&buffer[size_of::<libc::nlmsghdr>()..(size_of::<libc::nlmsgerr>()+size_of::<libc::nlmsghdr>())])
+            bytes_as_struct(
+                &buffer[size_of::<libc::nlmsghdr>()
+                    ..(size_of::<libc::nlmsgerr>() + size_of::<libc::nlmsghdr>())],
+            )
         };
 
         if ack_message.error != 0 {
@@ -427,4 +439,52 @@ unsafe fn struct_as_bytes<T>(s: &T) -> Box<[u8]> {
 unsafe fn bytes_as_struct<T>(bytes: &[u8]) -> T {
     assert_eq!(bytes.len(), size_of::<T>());
     unsafe { std::ptr::read(bytes.as_ptr() as *const T) }
+}
+
+/// Set a receive timeout on a socket
+pub fn set_socket_timeout(fd: RawFd, timeout: Duration) -> std::io::Result<()> {
+    let tv = timeval {
+        tv_sec: timeout.as_secs() as libc::time_t,
+        tv_usec: (timeout.subsec_micros()) as libc::suseconds_t,
+    };
+
+    let ret = unsafe {
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of::<timeval>() as libc::socklen_t,
+        )
+    };
+
+    if ret < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
+}
+
+/// Remove (clear) the socket timeout by setting it to 0
+pub fn clear_socket_timeout(fd: RawFd) -> std::io::Result<()> {
+    let tv = timeval {
+        tv_sec: 0,
+        tv_usec: 0,
+    };
+
+    let ret = unsafe {
+        setsockopt(
+            fd,
+            SOL_SOCKET,
+            SO_RCVTIMEO,
+            &tv as *const _ as *const libc::c_void,
+            std::mem::size_of::<timeval>() as libc::socklen_t,
+        )
+    };
+
+    if ret < 0 {
+        Err(std::io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
