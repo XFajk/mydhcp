@@ -1,14 +1,13 @@
 use libc::{AF_INET, AF_NETLINK, ioctl};
-use libc::{SO_RCVTIMEO, SOL_SOCKET, setsockopt, timeval};
-use log::{info, error};
-use std::time::Duration;
+use log::{error, info};
 use std::{
     ffi::{CString, c_void},
     io::Write,
     mem::{size_of, size_of_val},
     net::Ipv4Addr,
-    os::fd::RawFd,
 };
+
+use crate::socket_help::SocketFd;
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy)]
@@ -34,8 +33,8 @@ struct RtAttr {
 /// Manages network configuration using a netlink socket.
 #[derive(Debug)]
 pub struct NetConfigManager {
-    netlink_socket: RawFd,
-    control_socket: RawFd,
+    netlink_socket: SocketFd,
+    control_socket: SocketFd,
     interface_name: Box<str>,
     ip: Option<Ipv4Addr>,
     mask: Option<Ipv4Addr>,
@@ -45,43 +44,29 @@ pub struct NetConfigManager {
 impl NetConfigManager {
     /// Creates a new NetConfigManager by opening a netlink socket.
     pub fn new(interface_name: &str) -> std::io::Result<Self> {
-        let netlink_socket =
-            unsafe { libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE) };
+        let netlink_socket = SocketFd::try_from(unsafe {
+            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE)
+        })?;
 
-        if netlink_socket < 0 {
-            unsafe {
-                libc::close(netlink_socket);
-            }
-            return Err(std::io::Error::last_os_error());
-        }
+        //netlink_socket.set_socket_timeout(Duration::from_secs(2))?;
 
         let mut nl_addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
         nl_addr.nl_family = AF_NETLINK as u16;
 
         let binding_result = unsafe {
             libc::bind(
-                netlink_socket,
+                *netlink_socket,
                 &nl_addr as *const libc::sockaddr_nl as *const libc::sockaddr,
                 size_of::<libc::sockaddr_nl>() as u32,
             )
         };
 
         if binding_result < 0 {
-            unsafe {
-                libc::close(netlink_socket);
-            }
             return Err(std::io::Error::last_os_error());
         }
 
-        let control_socket = unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) };
-
-        if control_socket < 0 {
-            unsafe {
-                libc::close(netlink_socket);
-                libc::close(control_socket);
-            }
-            return Err(std::io::Error::last_os_error());
-        }
+        let control_socket =
+            SocketFd::try_from(unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) })?;
 
         Ok(NetConfigManager {
             netlink_socket,
@@ -123,7 +108,7 @@ impl NetConfigManager {
         }
 
         let op_result =
-            unsafe { ioctl(self.control_socket, libc::SIOCSIFADDR, &mut ifr as *mut _) };
+            unsafe { ioctl(*self.control_socket, libc::SIOCSIFADDR, &mut ifr as *mut _) };
 
         if op_result < 0 {
             return Err(std::io::Error::last_os_error());
@@ -136,7 +121,6 @@ impl NetConfigManager {
     pub fn set_mask(&mut self, mask: Ipv4Addr) -> std::io::Result<()> {
         info!(target: "mydhcp::netconfig::set_mask", "-- Setting netmask {} for interface {}", mask, self.interface_name);
         let interface_name = CString::new(self.interface_name.as_ref())?;
-
 
         let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
         let name_bytes = interface_name.as_bytes_with_nul();
@@ -165,7 +149,7 @@ impl NetConfigManager {
 
         let op_result = unsafe {
             ioctl(
-                self.control_socket,
+                *self.control_socket,
                 libc::SIOCSIFNETMASK,
                 &mut ifr as *mut _,
             )
@@ -197,11 +181,20 @@ impl NetConfigManager {
         }
 
         info!(target: "mydhcp::netconfig::set_gateway", "--- Building the Netlink frame to set the gatway");
+        let sequence_number = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?
+            .as_millis() as u32
+            ^ std::process::id();
+
         let mut header: libc::nlmsghdr = libc::nlmsghdr {
             nlmsg_len: 0,
             nlmsg_type: libc::RTM_NEWROUTE,
-            nlmsg_seq: 1,
-            nlmsg_flags: (libc::NLM_F_REQUEST | libc::NLM_F_CREATE | libc::NLM_F_REPLACE) as u16,
+            nlmsg_seq: sequence_number,
+            nlmsg_flags: (libc::NLM_F_REQUEST
+                | libc::NLM_F_CREATE
+                | libc::NLM_F_REPLACE
+                | libc::NLM_F_ACK) as u16,
             nlmsg_pid: 0,
         };
 
@@ -256,7 +249,7 @@ impl NetConfigManager {
         info!(target: "mydhcp::netconfig::set_gateway", "--- Sending the Netlink frame to set the gatway");
         let operaton_result = unsafe {
             libc::send(
-                self.netlink_socket,
+                *self.netlink_socket,
                 &buffer as *const _ as *const c_void,
                 buffer.len(),
                 0,
@@ -270,16 +263,15 @@ impl NetConfigManager {
         let mut buffer: [u8; 1024] = [0; 1024];
 
         info!(target: "mydhcp::netconfig::set_gateway", "--- Reciving a Netlink ACK frame to check if the operation was a success");
-        let _ = set_socket_timeout(self.netlink_socket, Duration::from_secs(2));
+
         let operation_result = unsafe {
             libc::recv(
-                self.netlink_socket,
+                *self.netlink_socket,
                 buffer.as_mut_ptr() as *mut c_void,
                 1024,
                 0,
             )
         };
-        let _ = clear_socket_timeout(self.netlink_socket);
 
         if operation_result < 0 {
             return Err(std::io::Error::last_os_error());
@@ -345,11 +337,17 @@ impl NetConfigManager {
             return Err(std::io::Error::last_os_error().into());
         }
 
+        let sequence_number = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?
+            .as_millis() as u32
+            ^ std::process::id();
+
         let mut header: libc::nlmsghdr = libc::nlmsghdr {
             nlmsg_len: 0,
             nlmsg_type: libc::RTM_DELROUTE,
-            nlmsg_seq: 1,
-            nlmsg_flags: libc::NLM_F_REQUEST as u16,
+            nlmsg_seq: sequence_number,
+            nlmsg_flags: (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16,
             nlmsg_pid: 0,
         };
 
@@ -403,7 +401,7 @@ impl NetConfigManager {
 
         let operaton_result = unsafe {
             libc::send(
-                self.netlink_socket,
+                *self.netlink_socket,
                 &buffer as *const _ as *const c_void,
                 buffer.len(),
                 0,
@@ -416,16 +414,14 @@ impl NetConfigManager {
 
         let mut buffer: [u8; 1024] = [0; 1024];
 
-        let _ = set_socket_timeout(self.netlink_socket, Duration::from_secs(2));
         let operation_result = unsafe {
             libc::recv(
-                self.netlink_socket,
+                *self.netlink_socket,
                 buffer.as_mut_ptr() as *mut c_void,
                 1024,
                 0,
             )
         };
-        let _ = clear_socket_timeout(self.netlink_socket);
 
         if operation_result < 0 {
             return Err(std::io::Error::last_os_error());
@@ -460,16 +456,11 @@ impl NetConfigManager {
 
 impl Drop for NetConfigManager {
     fn drop(&mut self) {
-        unsafe {
-
-            if let Err(e) = self.cleanup() {
-                error!(
-                    "Failed to clean up network configuration for interface '{}': {}",
-                    self.interface_name, e
-                );
-            }
-            libc::close(self.control_socket);
-            libc::close(self.netlink_socket);
+        if let Err(e) = self.cleanup() {
+            error!(
+                "Failed to clean up network configuration for interface '{}': {}",
+                self.interface_name, e
+            );
         }
     }
 }
@@ -487,52 +478,4 @@ unsafe fn struct_as_bytes<T>(s: &T) -> Box<[u8]> {
 unsafe fn bytes_as_struct<T>(bytes: &[u8]) -> T {
     assert_eq!(bytes.len(), size_of::<T>());
     unsafe { std::ptr::read(bytes.as_ptr() as *const T) }
-}
-
-/// Set a receive timeout on a socket
-pub fn set_socket_timeout(fd: RawFd, timeout: Duration) -> std::io::Result<()> {
-    let tv = timeval {
-        tv_sec: timeout.as_secs() as libc::time_t,
-        tv_usec: (timeout.subsec_micros()) as libc::suseconds_t,
-    };
-
-    let ret = unsafe {
-        setsockopt(
-            fd,
-            SOL_SOCKET,
-            SO_RCVTIMEO,
-            &tv as *const _ as *const libc::c_void,
-            std::mem::size_of::<timeval>() as libc::socklen_t,
-        )
-    };
-
-    if ret < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
-}
-
-/// Remove (clear) the socket timeout by setting it to 0
-pub fn clear_socket_timeout(fd: RawFd) -> std::io::Result<()> {
-    let tv = timeval {
-        tv_sec: 0,
-        tv_usec: 0,
-    };
-
-    let ret = unsafe {
-        setsockopt(
-            fd,
-            SOL_SOCKET,
-            SO_RCVTIMEO,
-            &tv as *const _ as *const libc::c_void,
-            std::mem::size_of::<timeval>() as libc::socklen_t,
-        )
-    };
-
-    if ret < 0 {
-        Err(std::io::Error::last_os_error())
-    } else {
-        Ok(())
-    }
 }

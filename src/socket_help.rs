@@ -1,6 +1,5 @@
 use std::{
-    ffi::CString,
-    os::{fd::RawFd, raw::c_void}, rc::Rc,
+    ffi::CString, ops::Deref, os::{fd::RawFd, raw::c_void}, rc::Rc, time::Duration,
 };
 
 use libc::{SO_ATTACH_FILTER, SOL_SOCKET};
@@ -9,30 +8,110 @@ use pcap::Capture;
 use crate::error::{self, DhcpClientError};
 
 #[derive(Debug)]
+pub struct SocketFd(RawFd);
+
+impl SocketFd {
+    /// Set a receive timeout on a socket
+    pub fn set_socket_timeout(&self, timeout: Duration) -> std::io::Result<()> {
+        let tv = libc::timeval {
+            tv_sec: timeout.as_secs() as libc::time_t,
+            tv_usec: (timeout.subsec_micros()) as libc::suseconds_t,
+        };
+
+        let ret = unsafe {
+            libc::setsockopt(
+                self.0,
+                SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                &tv as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+
+        if ret < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+
+    /// Remove (clear) the socket timeout by setting it to 0
+    pub fn clear_socket_timeout(&self) -> std::io::Result<()> {
+        let tv = libc::timeval {
+            tv_sec: 0,
+            tv_usec: 0,
+        };
+
+        let ret = unsafe {
+            libc::setsockopt(
+                self.0,
+                SOL_SOCKET,
+                libc::SO_RCVTIMEO,
+                &tv as *const _ as *const libc::c_void,
+                std::mem::size_of::<libc::timeval>() as libc::socklen_t,
+            )
+        };
+
+        if ret < 0 {
+            Err(std::io::Error::last_os_error())
+        } else {
+            Ok(())
+        }
+    }
+ 
+}
+
+impl Deref for SocketFd {
+    type Target = RawFd;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl TryFrom<RawFd> for SocketFd {
+    type Error = std::io::Error;
+
+    fn try_from(fd: RawFd) -> Result<Self, Self::Error> {
+        if fd < 0 {
+            Err(std::io::Error::from_raw_os_error(fd))
+        } else {
+            Ok(SocketFd(fd))    
+        }
+    }
+}
+
+impl Drop for SocketFd {
+    fn drop(&mut self) {
+        unsafe {
+            libc::close(self.0);
+        }
+    }
+}
+
+#[derive(Debug)]
 pub struct RawSocket {
-    fd: RawFd,
+    fd: SocketFd,
     pub interface: Rc<str>,
     interface_index: u32,
     pub interface_mac_address: [u8; 6]
 }
 
 impl RawSocket {
-    pub fn bind(interface_name: &str) -> Result<Self, DhcpClientError> {
+    pub fn bind(interface_name: &str, timeout: Option<Duration>) -> Result<Self, DhcpClientError> {
         use mac_address::mac_address_by_name;
 
-        let fd = unsafe {
+        let fd = SocketFd::try_from(unsafe {
             libc::socket(
                 libc::AF_PACKET,
                 libc::SOCK_RAW,
                 libc::htons(libc::ETH_P_ALL as u16) as i32,
             )
-        };
+        })?;
 
-        if fd < 0 {
-            return Err(std::io::Error::last_os_error().into());
+        if let Some(timeout_duration) = timeout {
+            fd.set_socket_timeout(timeout_duration)?;
         }
-
-        let fd: RawFd = RawFd::from(fd);
 
         let interface_index =
             unsafe { libc::if_nametoindex(CString::new(interface_name).map_err(|err| std::io::Error::from(err))?.as_ptr()) };
@@ -52,7 +131,7 @@ impl RawSocket {
 
         let binding_result = unsafe {
             libc::bind(
-                fd,
+                *fd,
                 &socket_address as *const libc::sockaddr_ll as *const libc::sockaddr,
                 std::mem::size_of::<libc::sockaddr_ll>() as u32,
             )
@@ -83,7 +162,7 @@ impl RawSocket {
 
         let setting_fileter_result = unsafe {
             libc::setsockopt(
-                self.fd,
+                *self.fd,
                 SOL_SOCKET,
                 SO_ATTACH_FILTER,
                 &filter_program as *const libc::sock_fprog as *const c_void,
@@ -130,7 +209,7 @@ impl RawSocket {
 
         let send_result = unsafe {
             libc::sendto(
-                self.fd,
+                *self.fd,
                 frame_data.as_ptr() as *const c_void,
                 frame_data.len(),
                 0,
@@ -155,7 +234,7 @@ impl RawSocket {
 
         let recived_lenght = unsafe {
             libc::recvfrom(
-                self.fd,
+                *self.fd,
                 frame_data.as_mut_ptr() as *mut c_void,
                 frame_data.capacity(),
                 0,
@@ -178,7 +257,7 @@ impl RawSocket {
 impl Drop for RawSocket {
     fn drop(&mut self) {
         unsafe {
-            libc::close(self.fd);
+            libc::close(*self.fd);
         }
     }
 }

@@ -11,7 +11,7 @@ use std::{
     env::args,
     net::Ipv4Addr,
     rc::Rc,
-    sync::atomic::{AtomicBool, Ordering},
+    sync::atomic::{AtomicBool, Ordering}, time::Duration,
 };
 
 use dhcp_help::*;
@@ -163,7 +163,7 @@ impl DhcpClient {
                 });
 
             info!(target: "mydhcp::connect", "- Creating a Socket for DHCP comunication on interface: {}", interface_name);
-            let socket = Rc::new(RawSocket::bind(interface_name)?);
+            let socket = Rc::new(RawSocket::bind(interface_name, Some(Duration::from_secs(1)))?);
             socket.set_filter_command("udp port 68 or udp port 67")?;
 
             Ok(Self::Connected { socket })
