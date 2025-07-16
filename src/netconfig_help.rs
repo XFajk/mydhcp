@@ -1,41 +1,16 @@
-use libc::{AF_INET, AF_NETLINK, ioctl};
 use log::{error, info};
 use std::{
-    ffi::{CString, c_void},
     io::Write,
-    mem::{size_of, size_of_val},
     net::Ipv4Addr,
+    process::Command,
+    rc::Rc,
 };
 
-use crate::socket_help::SocketFd;
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct RtMsg {
-    rtm_family: u8,
-    rtm_dst_len: u8,
-    rtm_src_len: u8,
-    rtm_tos: u8,
-    rtm_table: u8,
-    rtm_protocol: u8,
-    rtm_scope: u8,
-    rtm_type: u8,
-    rtm_flags: u32,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy)]
-struct RtAttr {
-    rta_len: u16,
-    rta_type: u16,
-}
-
 /// Manages network configuration using a netlink socket.
+/// TODO: this method has to use netlink in future this shell out solution is only temporary
 #[derive(Debug)]
 pub struct NetConfigManager {
-    netlink_socket: SocketFd,
-    control_socket: SocketFd,
-    interface_name: Box<str>,
+    interface_name: Rc<str>,
     ip: Option<Ipv4Addr>,
     mask: Option<Ipv4Addr>,
     gateway: Option<Ipv4Addr>,
@@ -43,122 +18,29 @@ pub struct NetConfigManager {
 
 impl NetConfigManager {
     /// Creates a new NetConfigManager by opening a netlink socket.
-    pub fn new(interface_name: &str) -> std::io::Result<Self> {
-        let netlink_socket = SocketFd::try_from(unsafe {
-            libc::socket(libc::AF_NETLINK, libc::SOCK_RAW, libc::NETLINK_ROUTE)
-        })?;
-
-        //netlink_socket.set_socket_timeout(Duration::from_secs(2))?;
-
-        let mut nl_addr: libc::sockaddr_nl = unsafe { std::mem::zeroed() };
-        nl_addr.nl_family = AF_NETLINK as u16;
-
-        let binding_result = unsafe {
-            libc::bind(
-                *netlink_socket,
-                &nl_addr as *const libc::sockaddr_nl as *const libc::sockaddr,
-                size_of::<libc::sockaddr_nl>() as u32,
-            )
-        };
-
-        if binding_result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let control_socket =
-            SocketFd::try_from(unsafe { libc::socket(libc::AF_INET, libc::SOCK_DGRAM, 0) })?;
-
+    pub fn new(interface_name: &Rc<str>) -> std::io::Result<Self> {
         Ok(NetConfigManager {
-            netlink_socket,
-            control_socket,
-            interface_name: interface_name.into(),
+            interface_name: Rc::clone(interface_name),
             ip: None,
             mask: None,
             gateway: None,
         })
     }
 
-    pub fn set_ip(&mut self, ip: Ipv4Addr) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::set_ip", "-- Setting IP address {} for interface {}", ip, self.interface_name);
-        let interface_name = CString::new(self.interface_name.as_ref())?;
-
-        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
-        let name_bytes = interface_name.as_bytes_with_nul();
-
-        if name_bytes.len() > ifr.ifr_name.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "interface name too long",
-            ));
-        }
-
-        ifr.ifr_name[..name_bytes.len()].copy_from_slice(&name_bytes);
-
-        let mut addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-        addr.sin_family = AF_INET as u16;
-        addr.sin_addr.s_addr = u32::from(ip).to_be();
-
-        unsafe {
-            let ifr_addr_ptr = &mut ifr.ifr_ifru.ifru_addr as *mut libc::sockaddr;
-            std::ptr::copy_nonoverlapping(
-                &addr as *const libc::sockaddr_in as *const libc::sockaddr,
-                ifr_addr_ptr,
-                1,
-            );
-        }
-
-        let op_result =
-            unsafe { ioctl(*self.control_socket, libc::SIOCSIFADDR, &mut ifr as *mut _) };
-
-        if op_result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
+    pub fn set_ip_and_mask(&mut self, ip: Ipv4Addr, mask: Ipv4Addr) -> std::io::Result<()> {
+        info!(target: "mydhcp::netconfig::set_ip", "-- Setting IP address {}/{} for interface {}", ip,  mask.to_bits().count_ones(), self.interface_name);
+        // TODO: Replace this logic with neli crate for netlink functionlaity
+        let _ = Command::new("ip")
+            .args([
+                "addr",
+                "add",
+                &format!("{}/{}", ip, mask.to_bits().count_ones()),
+                "dev",
+                self.interface_name.as_ref(),
+            ])
+            .output()?;
 
         self.ip = Some(ip);
-        Ok(())
-    }
-
-    pub fn set_mask(&mut self, mask: Ipv4Addr) -> std::io::Result<()> {
-        info!(target: "mydhcp::netconfig::set_mask", "-- Setting netmask {} for interface {}", mask, self.interface_name);
-        let interface_name = CString::new(self.interface_name.as_ref())?;
-
-        let mut ifr: libc::ifreq = unsafe { std::mem::zeroed() };
-        let name_bytes = interface_name.as_bytes_with_nul();
-
-        if name_bytes.len() > ifr.ifr_name.len() {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidInput,
-                "interface name too long",
-            ));
-        }
-
-        ifr.ifr_name[..name_bytes.len()].copy_from_slice(&name_bytes);
-
-        let mut mask_addr: libc::sockaddr_in = unsafe { std::mem::zeroed() };
-        mask_addr.sin_family = AF_INET as u16;
-        mask_addr.sin_addr.s_addr = u32::from(mask).to_be();
-
-        unsafe {
-            let ifr_addr_ptr = &mut ifr.ifr_ifru.ifru_addr as *mut libc::sockaddr;
-            std::ptr::copy_nonoverlapping(
-                &mask_addr as *const libc::sockaddr_in as *const libc::sockaddr,
-                ifr_addr_ptr,
-                1,
-            );
-        }
-
-        let op_result = unsafe {
-            ioctl(
-                *self.control_socket,
-                libc::SIOCSIFNETMASK,
-                &mut ifr as *mut _,
-            )
-        };
-
-        if op_result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
         self.mask = Some(mask);
         Ok(())
     }
@@ -166,137 +48,18 @@ impl NetConfigManager {
     pub fn set_gateway(&mut self, gateway: Ipv4Addr) -> std::io::Result<()> {
         info!(target: "mydhcp::netconfig::set_gateway", "-- Setting gateway {} for interface {}", gateway, self.interface_name);
 
-        // the reason why I dont pass a index right a way and derive becaue I think it is safer and more inline with the rest of the methods
-        // the fact is cheking if the index is valid would require the same amount of code but it would not be inline so that is why I decied to put a
-        // interface name as a parameter
-        let interface_index = unsafe {
-            libc::if_nametoindex(
-                CString::new(self.interface_name.as_ref())
-                    .map_err(|err| std::io::Error::from(err))?
-                    .as_ptr(),
-            )
-        };
-        if interface_index == 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
-
-        info!(target: "mydhcp::netconfig::set_gateway", "--- Building the Netlink frame to set the gatway");
-        let sequence_number = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?
-            .as_millis() as u32
-            ^ std::process::id();
-
-        let mut header: libc::nlmsghdr = libc::nlmsghdr {
-            nlmsg_len: 0,
-            nlmsg_type: libc::RTM_NEWROUTE,
-            nlmsg_seq: sequence_number,
-            nlmsg_flags: (libc::NLM_F_REQUEST
-                | libc::NLM_F_CREATE
-                | libc::NLM_F_REPLACE
-                | libc::NLM_F_ACK) as u16,
-            nlmsg_pid: 0,
-        };
-
-        let message: RtMsg = RtMsg {
-            rtm_family: libc::AF_INET as u8,
-            rtm_dst_len: 0u8,
-            rtm_src_len: 0u8,
-            rtm_tos: 0u8,
-            rtm_table: libc::RT_TABLE_MAIN as u8,
-            rtm_protocol: libc::RTPROT_STATIC,
-            rtm_scope: libc::RT_SCOPE_UNIVERSE,
-            rtm_type: libc::RTN_UNICAST,
-            rtm_flags: 0u32,
-        };
-
-        let gateway_attribute: RtAttr = RtAttr {
-            rta_len: (size_of::<RtAttr>() + 4) as u16,
-            rta_type: libc::RTA_GATEWAY,
-        };
-
-        let gateway_addr = u32::from(gateway);
-
-        let interface_attribute: RtAttr = RtAttr {
-            rta_len: (size_of::<RtAttr>() + 4) as u16,
-            rta_type: libc::RTA_OIF,
-        };
-
-        let dst_attribute = RtAttr {
-            rta_len: (size_of::<RtAttr>() + 4) as u16,
-            rta_type: libc::RTA_DST,
-        };
-
-        let dst_addr = u32::from(Ipv4Addr::UNSPECIFIED);
-
-        let message_length =
-            size_of_val(&header) + size_of_val(&message) + size_of::<RtAttr>() * 3 + 12; // these 12 bytes are for the added gatway address, interface index and destination address
-
-        let mut buffer: Vec<u8> = Vec::with_capacity(message_length);
-        header.nlmsg_len = message_length as u32;
-
-        unsafe {
-            buffer.extend_from_slice(&struct_as_bytes(&header));
-            buffer.extend_from_slice(&struct_as_bytes(&message));
-            buffer.extend_from_slice(&struct_as_bytes(&gateway_attribute));
-            buffer.extend_from_slice(&gateway_addr.to_be_bytes());
-            buffer.extend_from_slice(&struct_as_bytes(&interface_attribute));
-            buffer.extend_from_slice(&interface_index.to_be_bytes());
-            buffer.extend_from_slice(&struct_as_bytes(&dst_attribute));
-            buffer.extend_from_slice(&dst_addr.to_be_bytes());
-        }
-
-        info!(target: "mydhcp::netconfig::set_gateway", "--- Sending the Netlink frame to set the gatway");
-        let operaton_result = unsafe {
-            libc::send(
-                *self.netlink_socket,
-                &buffer as *const _ as *const c_void,
-                buffer.len(),
-                0,
-            )
-        };
-
-        if operaton_result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let mut buffer: [u8; 1024] = [0; 1024];
-
-        info!(target: "mydhcp::netconfig::set_gateway", "--- Reciving a Netlink ACK frame to check if the operation was a success");
-
-        let operation_result = unsafe {
-            libc::recv(
-                *self.netlink_socket,
-                buffer.as_mut_ptr() as *mut c_void,
-                1024,
-                0,
-            )
-        };
-
-        if operation_result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let ack_header: libc::nlmsghdr =
-            unsafe { bytes_as_struct(&buffer[..size_of::<libc::nlmsghdr>()]) };
-
-        if ack_header.nlmsg_type != libc::NLMSG_ERROR as u16 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to set gateway the netlink ack message is invalid",
-            ));
-        }
-
-        let ack_message: libc::nlmsgerr = unsafe {
-            bytes_as_struct(
-                &buffer[size_of::<libc::nlmsghdr>()
-                    ..(size_of::<libc::nlmsgerr>() + size_of::<libc::nlmsghdr>())],
-            )
-        };
-
-        if ack_message.error != 0 {
-            return Err(std::io::Error::from_raw_os_error(ack_message.error));
-        }
+        // TODO: Replace this logic with neli crate for netlink functionlaity
+        let _ = Command::new("ip")
+            .args([
+                "route",
+                "add",
+                "default",
+                "via",
+                &gateway.to_string(),
+                "dev",
+                self.interface_name.as_ref(),
+            ])
+            .output()?;
 
         self.gateway = Some(gateway);
         Ok(())
@@ -322,133 +85,38 @@ impl NetConfigManager {
         let _ = std::fs::File::create("/etc/resolv.conf")?;
 
         if let None = self.gateway {
-            info!(target: "mydhcp::netconfig::cleanup", "--- No gateway set, skipping gateway removal");
+            info!(target: "mydhcp::netconfig::cleanup", "- No gateway set, skipping gateway removal");
+            return Ok(());
+        }
+        // TODO: Replace this logic with neli crate for netlink functionlaity
+        let _ = Command::new("ip")
+            .args([
+                "route",
+                "flush",
+                "dev",
+                self.interface_name.as_ref(),
+            ])
+            .output()?;
+
+        self.gateway = None;
+
+        if let None = self.ip && let None = self.mask {
+            info!(target: "mydhcp::netconfig::cleanup", "- No ip and mask set, skipping their removal");
             return Ok(());
         }
 
-        let interface_index = unsafe {
-            libc::if_nametoindex(
-                CString::new(self.interface_name.as_ref())
-                    .map_err(|err| std::io::Error::from(err))?
-                    .as_ptr(),
-            )
-        };
-        if interface_index == 0 {
-            return Err(std::io::Error::last_os_error().into());
-        }
+        // TODO: Replace this logic with neli crate for netlink functionlaity
+        let _ = Command::new("ip")
+            .args([
+                "addr",
+                "flush",
+                "dev",
+                self.interface_name.as_ref(),
+            ])
+            .output()?;
 
-        let sequence_number = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_err(|err| std::io::Error::new(std::io::ErrorKind::Other, err))?
-            .as_millis() as u32
-            ^ std::process::id();
-
-        let mut header: libc::nlmsghdr = libc::nlmsghdr {
-            nlmsg_len: 0,
-            nlmsg_type: libc::RTM_DELROUTE,
-            nlmsg_seq: sequence_number,
-            nlmsg_flags: (libc::NLM_F_REQUEST | libc::NLM_F_ACK) as u16,
-            nlmsg_pid: 0,
-        };
-
-        let message: RtMsg = RtMsg {
-            rtm_family: libc::AF_INET as u8,
-            rtm_dst_len: 0u8,
-            rtm_src_len: 0u8,
-            rtm_tos: 0u8,
-            rtm_table: libc::RT_TABLE_MAIN as u8,
-            rtm_protocol: libc::RTPROT_STATIC,
-            rtm_scope: libc::RT_SCOPE_UNIVERSE,
-            rtm_type: libc::RTN_UNICAST,
-            rtm_flags: 0u32,
-        };
-
-        let gateway_attribute: RtAttr = RtAttr {
-            rta_len: (size_of::<RtAttr>() + 4) as u16,
-            rta_type: libc::RTA_GATEWAY,
-        };
-
-        let gateway_addr = u32::from(self.gateway.unwrap()); // safe unwrap because we check if gateway is set at the start of the cleanup 
-
-        let dst_attribute = RtAttr {
-            rta_len: (size_of::<RtAttr>() + 4) as u16,
-            rta_type: libc::RTA_DST,
-        };
-
-        let dst_addr = u32::from(Ipv4Addr::UNSPECIFIED);
-
-        let interface_attribute: RtAttr = RtAttr {
-            rta_len: (size_of::<RtAttr>() + 4) as u16,
-            rta_type: libc::RTA_OIF,
-        };
-
-        let message_length =
-            size_of_val(&header) + size_of_val(&message) + size_of::<RtAttr>() * 3 + 12; // these 12 bytes are for the added gateway address, interface index and destination address
-
-        let mut buffer: Vec<u8> = Vec::with_capacity(message_length);
-        header.nlmsg_len = message_length as u32;
-
-        unsafe {
-            buffer.extend_from_slice(&struct_as_bytes(&header));
-            buffer.extend_from_slice(&struct_as_bytes(&message));
-            buffer.extend_from_slice(&struct_as_bytes(&dst_attribute));
-            buffer.extend_from_slice(&dst_addr.to_be_bytes());
-            buffer.extend_from_slice(&struct_as_bytes(&interface_attribute));
-            buffer.extend_from_slice(&interface_index.to_be_bytes());
-            buffer.extend_from_slice(&struct_as_bytes(&gateway_attribute));
-            buffer.extend_from_slice(&gateway_addr.to_be_bytes());
-        }
-
-        let operaton_result = unsafe {
-            libc::send(
-                *self.netlink_socket,
-                &buffer as *const _ as *const c_void,
-                buffer.len(),
-                0,
-            )
-        };
-
-        if operaton_result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let mut buffer: [u8; 1024] = [0; 1024];
-
-        let operation_result = unsafe {
-            libc::recv(
-                *self.netlink_socket,
-                buffer.as_mut_ptr() as *mut c_void,
-                1024,
-                0,
-            )
-        };
-
-        if operation_result < 0 {
-            return Err(std::io::Error::last_os_error());
-        }
-
-        let ack_header: libc::nlmsghdr =
-            unsafe { bytes_as_struct(&buffer[..size_of::<libc::nlmsghdr>()]) };
-
-        if ack_header.nlmsg_type != libc::NLMSG_ERROR as u16 {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::Other,
-                "Failed to set gateway the netlink ack message is invalid",
-            ));
-        }
-
-        let ack_message: libc::nlmsgerr = unsafe {
-            bytes_as_struct(
-                &buffer[size_of::<libc::nlmsghdr>()
-                    ..(size_of::<libc::nlmsgerr>() + size_of::<libc::nlmsghdr>())],
-            )
-        };
-
-        if ack_message.error != 0 {
-            return Err(std::io::Error::from_raw_os_error(ack_message.error));
-        }
-
-        self.gateway = None;
+        self.ip = None;
+        self.mask = None;
 
         Ok(())
     }
@@ -463,19 +131,4 @@ impl Drop for NetConfigManager {
             );
         }
     }
-}
-
-unsafe fn struct_as_bytes<T>(s: &T) -> Box<[u8]> {
-    let size = size_of::<T>();
-    let ptr = s as *const T as *const u8;
-    unsafe {
-        std::slice::from_raw_parts(ptr, size)
-            .to_vec()
-            .into_boxed_slice()
-    }
-}
-
-unsafe fn bytes_as_struct<T>(bytes: &[u8]) -> T {
-    assert_eq!(bytes.len(), size_of::<T>());
-    unsafe { std::ptr::read(bytes.as_ptr() as *const T) }
 }

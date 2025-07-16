@@ -478,10 +478,8 @@ impl DhcpClient {
 
             info!(target: "mydhcp::activate", "- Configuring the network with the received options");
             let mut net_config = NetConfigManager::new(&socket.interface)?;
-            net_config.set_ip(ip)?;
-            if let Some(mask) = mask {
-                net_config.set_mask(mask)?;
-            }
+            net_config.set_ip_and_mask(ip, mask.unwrap_or(Ipv4Addr::UNSPECIFIED))?;
+            
             if let Some(gateways) = gateways {
                 net_config.set_gateway(
                     gateways
