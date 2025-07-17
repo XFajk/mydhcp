@@ -1,7 +1,7 @@
 use etherparse::{SlicedPacket, TransportSlice};
 use mac_address::mac_address_by_name;
 use std::{
-    mem::{discriminant, Discriminant},
+    mem::{Discriminant, discriminant},
     net::Ipv4Addr,
     ops::{Deref, DerefMut},
     rc::Rc,
@@ -249,14 +249,11 @@ impl DhcpOptions {
 
             i += (2 + option_len) as usize;
         }
-    
+
         Some(DhcpOptions(result.into()))
     }
 
-    pub fn search_for_option(
-        &self,
-        option_discriminant: Discriminant<DhcpOption>,
-    ) -> Option<DhcpOption> {
+    pub fn search(&self, option_discriminant: Discriminant<DhcpOption>) -> Option<DhcpOption> {
         for o in self.iter() {
             if discriminant(o) == option_discriminant {
                 return Some(o.clone());
@@ -295,10 +292,7 @@ impl DhcpOptions {
         differences.into_boxed_slice()
     }
 
-    pub fn combine(
-        new_options: &[DhcpOption],
-        old_options: &[DhcpOption],
-    ) -> Self {
+    pub fn combine(new_options: &[DhcpOption], old_options: &[DhcpOption]) -> Self {
         use std::mem::discriminant;
 
         let mut result: Vec<DhcpOption> = Vec::from(new_options);

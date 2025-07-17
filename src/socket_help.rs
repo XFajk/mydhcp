@@ -1,5 +1,9 @@
 use std::{
-    ffi::CString, ops::Deref, os::{fd::RawFd, raw::c_void}, rc::Rc, time::Duration,
+    ffi::CString,
+    ops::Deref,
+    os::{fd::RawFd, raw::c_void},
+    rc::Rc,
+    time::Duration,
 };
 
 use libc::{SO_ATTACH_FILTER, SOL_SOCKET};
@@ -58,7 +62,6 @@ impl SocketFd {
             Ok(())
         }
     }
- 
 }
 
 impl Deref for SocketFd {
@@ -76,7 +79,7 @@ impl TryFrom<RawFd> for SocketFd {
         if fd < 0 {
             Err(std::io::Error::from_raw_os_error(fd))
         } else {
-            Ok(SocketFd(fd))    
+            Ok(SocketFd(fd))
         }
     }
 }
@@ -94,7 +97,7 @@ pub struct RawSocket {
     fd: SocketFd,
     pub interface: Rc<str>,
     interface_index: u32,
-    pub interface_mac_address: [u8; 6]
+    pub interface_mac_address: [u8; 6],
 }
 
 impl RawSocket {
@@ -113,8 +116,13 @@ impl RawSocket {
             fd.set_socket_timeout(timeout_duration)?;
         }
 
-        let interface_index =
-            unsafe { libc::if_nametoindex(CString::new(interface_name).map_err(|err| std::io::Error::from(err))?.as_ptr()) };
+        let interface_index = unsafe {
+            libc::if_nametoindex(
+                CString::new(interface_name)
+                    .map_err(|err| std::io::Error::from(err))?
+                    .as_ptr(),
+            )
+        };
         if interface_index == 0 {
             return Err(std::io::Error::last_os_error().into());
         }
@@ -143,14 +151,16 @@ impl RawSocket {
 
         let interface: Rc<str> = interface_name.into();
         let interface_mac_address: [u8; 6] = mac_address_by_name(&interface)?
-                    .ok_or(DhcpClientError::InterfaceMissingMacAddress(Rc::clone(&interface)))? 
-                    .bytes();
+            .ok_or(DhcpClientError::InterfaceMissingMacAddress(Rc::clone(
+                &interface,
+            )))?
+            .bytes();
 
         Ok(Self {
             fd,
             interface,
             interface_index,
-            interface_mac_address
+            interface_mac_address,
         })
     }
 
@@ -178,11 +188,9 @@ impl RawSocket {
     }
 
     pub fn set_filter_command(&self, filter_cmd: &str) -> Result<(), error::DhcpClientError> {
-        let capture = Capture::from_device::<&str>(&self.interface)?
-            .open()?;
+        let capture = Capture::from_device::<&str>(&self.interface)?.open()?;
 
-        let mut filter_program = capture
-            .compile(filter_cmd, true)?;
+        let mut filter_program = capture.compile(filter_cmd, true)?;
 
         self.set_filter(convert_pcap_bpf_program_to_libc_bpf_instructions(
             &mut filter_program,
@@ -223,7 +231,6 @@ impl RawSocket {
         } else {
             Ok(send_result as usize)
         }
-
     }
 
     pub fn recv_from(&self) -> std::io::Result<(Vec<u8>, libc::sockaddr_ll)> {

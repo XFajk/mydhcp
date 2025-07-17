@@ -9,6 +9,7 @@ use etherparse::{PacketBuilder, SlicedPacket};
 use log::{error, info, warn};
 use std::{
     env::args,
+    mem::discriminant,
     net::Ipv4Addr,
     rc::Rc,
     sync::atomic::{AtomicBool, Ordering},
@@ -236,13 +237,12 @@ impl DhcpClient {
             let dhcp_options = DhcpOptions::parse_dhcp_options(&response.dhcp_options)
                 .ok_or(DhcpClientError::DhcpOptionParsingError)?;
 
-            let server_ip = match (*dhcp_options)
-                .iter()
-                .find(|x| matches!(x, DhcpOption::ServerId(_)))
+            let server_ip = match dhcp_options
+                .search(discriminant(&DhcpOption::ServerId(Ipv4Addr::UNSPECIFIED)))
                 .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
                     "Server IP address".into(),
                 ))? {
-                DhcpOption::ServerId(ip) => *ip,
+                DhcpOption::ServerId(ip) => ip,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                 ),
@@ -365,13 +365,12 @@ impl DhcpClient {
             info!(target: "mydhcp::activate", "Activating the DHCP Client with the received configuration");
 
             if server_ip == Ipv4Addr::BROADCAST {
-                let server_ip = match (*acknowledged_options)
-                    .iter()
-                    .find(|x| matches!(x, DhcpOption::ServerId(_)))
+                let server_ip = match acknowledged_options
+                    .search(discriminant(&DhcpOption::ServerId(Ipv4Addr::UNSPECIFIED)))
                     .ok_or(DhcpClientError::DhcpResponseOptionsMissingComponent(
                         "Server IP address".into(),
                     ))? {
-                    DhcpOption::ServerId(ip) => *ip,
+                    DhcpOption::ServerId(ip) => ip,
                     _ => panic!(
                         "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
                     ),
@@ -380,10 +379,9 @@ impl DhcpClient {
             }
 
             let mask = match acknowledged_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::SubnetMask(_)))
+                .search(discriminant(&DhcpOption::SubnetMask(Ipv4Addr::UNSPECIFIED)))
             {
-                Some(DhcpOption::SubnetMask(mask)) => Some(*mask),
+                Some(DhcpOption::SubnetMask(mask)) => Some(mask),
                 None => None,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
@@ -396,10 +394,9 @@ impl DhcpClient {
             }
 
             let dns_servers = match acknowledged_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::DomainNameServer(_)))
+                .search(discriminant(&DhcpOption::DomainNameServer(Rc::new([]))))
             {
-                Some(DhcpOption::DomainNameServer(servers)) => Some(Rc::clone(servers)),
+                Some(DhcpOption::DomainNameServer(servers)) => Some(servers),
                 None => None,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
@@ -412,10 +409,9 @@ impl DhcpClient {
             }
 
             let gateways = match acknowledged_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::Gateway(_)))
+                .search(discriminant(&DhcpOption::Gateway(Rc::new([]))))
             {
-                Some(DhcpOption::Gateway(gates)) => Some(Rc::clone(gates)),
+                Some(DhcpOption::Gateway(gates)) => Some(gates),
                 None => None,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
@@ -428,10 +424,9 @@ impl DhcpClient {
             }
 
             let lease_time = match acknowledged_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::IpAddressLeaseTime(_)))
+                .search(discriminant(&DhcpOption::IpAddressLeaseTime(0)))
             {
-                Some(DhcpOption::IpAddressLeaseTime(t)) => *t,
+                Some(DhcpOption::IpAddressLeaseTime(t)) => t,
                 None => 500,
                 _ => panic!(
                     "this branch will of code should never execute since the find method already check for a ServerId and and the ok_or handles if nothing is returned so there is no need to put something here"
@@ -440,13 +435,10 @@ impl DhcpClient {
             info!(target: "mydhcp::activate", "- Lease Time: {} seconds", lease_time);
 
             // Extract T1 and T2 timers from acknowledged_options, with defaults and warnings
-            let t1 = match acknowledged_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::RenewalTime(_)))
-            {
+            let t1 = match acknowledged_options.search(discriminant(&DhcpOption::RenewalTime(0))) {
                 Some(DhcpOption::RenewalTime(val)) => {
                     info!(target: "mydhcp::activate", "- Renewal (T1) Time: {} seconds", val);
-                    *val
+                    val
                 }
                 _ => {
                     warn!(target: "mydhcp::activate", "- T1 (Renewal Time) not provided by server, using default (50% of lease time)");
@@ -454,13 +446,11 @@ impl DhcpClient {
                 }
             };
 
-            let t2 = match acknowledged_options
-                .iter()
-                .find(|x| matches!(x, DhcpOption::RebindingTime(_)))
+            let t2 = match acknowledged_options.search(discriminant(&DhcpOption::RebindingTime(0)))
             {
                 Some(DhcpOption::RebindingTime(val)) => {
                     info!(target: "mydhcp::activate", "- Rebinding (T2) Time: {} seconds", val);
-                    *val
+                    val
                 }
                 _ => {
                     warn!(target: "mydhcp::activate", "- T2 (Rebinding Time) not provided by server, using default (87.5% of lease time)");
@@ -633,7 +623,7 @@ impl DhcpClient {
 
             if let Some(dhcp_options) = DhcpOptions::parse_dhcp_options(&dhcp_payload.dhcp_options)
             {
-                let message_type = dhcp_options.search_for_option(std::mem::discriminant(
+                let message_type = dhcp_options.search(discriminant(
                     &DhcpOption::DhcpMessageType(DhcpMessage::Unsupported),
                 ))?;
                 if let DhcpOption::DhcpMessageType(t) = message_type {

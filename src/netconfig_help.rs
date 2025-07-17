@@ -1,10 +1,5 @@
 use log::{error, info};
-use std::{
-    io::Write,
-    net::Ipv4Addr,
-    process::Command,
-    rc::Rc,
-};
+use std::{io::Write, net::Ipv4Addr, process::Command, rc::Rc};
 
 /// Manages network configuration using a netlink socket.
 /// TODO: this method has to use netlink in future this shell out solution is only temporary
@@ -90,29 +85,21 @@ impl NetConfigManager {
         }
         // TODO: Replace this logic with neli crate for netlink functionlaity
         let _ = Command::new("ip")
-            .args([
-                "route",
-                "flush",
-                "dev",
-                self.interface_name.as_ref(),
-            ])
+            .args(["route", "flush", "dev", self.interface_name.as_ref()])
             .output()?;
 
         self.gateway = None;
 
-        if let None = self.ip && let None = self.mask {
+        if let None = self.ip
+            && let None = self.mask
+        {
             info!(target: "mydhcp::netconfig::cleanup", "- No ip and mask set, skipping their removal");
             return Ok(());
         }
 
         // TODO: Replace this logic with neli crate for netlink functionlaity
         let _ = Command::new("ip")
-            .args([
-                "addr",
-                "flush",
-                "dev",
-                self.interface_name.as_ref(),
-            ])
+            .args(["addr", "flush", "dev", self.interface_name.as_ref()])
             .output()?;
 
         self.ip = None;
