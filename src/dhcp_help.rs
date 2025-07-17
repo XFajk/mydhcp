@@ -1,6 +1,11 @@
 use etherparse::{SlicedPacket, TransportSlice};
 use mac_address::mac_address_by_name;
-use std::{net::Ipv4Addr, rc::Rc};
+use std::{
+    mem::{discriminant, Discriminant},
+    net::Ipv4Addr,
+    ops::{Deref, DerefMut},
+    rc::Rc,
+};
 
 #[repr(u8)]
 #[derive(Debug, Copy, Clone, PartialEq, Eq)]
@@ -111,29 +116,6 @@ impl From<(u8, Vec<u8>)> for DhcpOption {
 }
 
 impl DhcpOption {
-    pub fn parse_dhcp_options(options: &[u8]) -> Option<Rc<[Self]>> {
-        let mut result = Vec::<Self>::new();
-
-        let mut i = 0;
-        while i < options.len() {
-            let option = u8::from_be(*options.get(i)?);
-            if option == 0xff {
-                break;
-            }
-
-            let option_len: u8 = u8::from_be(*options.get(i + 1)?);
-            let mut value = Vec::<u8>::with_capacity(option_len as usize);
-
-            value.extend_from_slice(options.get(i + 2..i + 2 + (option_len as usize))?);
-
-            result.push((option, value).into());
-
-            i += (2 + option_len) as usize;
-        }
-
-        Some(result.into())
-    }
-
     pub fn into_bytes(options: &[Self]) -> Rc<[u8]> {
         let mut bytes = Vec::new();
         for option in options {
@@ -227,6 +209,108 @@ impl DhcpOption {
             bytes.push(255);
         }
         bytes.into()
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct DhcpOptions(Rc<[DhcpOption]>);
+
+impl Deref for DhcpOptions {
+    type Target = Rc<[DhcpOption]>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
+    }
+}
+
+impl DerefMut for DhcpOptions {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut self.0
+    }
+}
+
+impl DhcpOptions {
+    pub fn parse_dhcp_options(options: &[u8]) -> Option<Self> {
+        let mut result = Vec::<DhcpOption>::new();
+
+        let mut i = 0;
+        while i < options.len() {
+            let option = u8::from_be(*options.get(i)?);
+            if option == 0xff {
+                break;
+            }
+
+            let option_len: u8 = u8::from_be(*options.get(i + 1)?);
+            let mut value = Vec::<u8>::with_capacity(option_len as usize);
+
+            value.extend_from_slice(options.get(i + 2..i + 2 + (option_len as usize))?);
+
+            result.push((option, value).into());
+
+            i += (2 + option_len) as usize;
+        }
+    
+        Some(DhcpOptions(result.into()))
+    }
+
+    pub fn search_for_option(
+        &self,
+        option_discriminant: Discriminant<DhcpOption>,
+    ) -> Option<DhcpOption> {
+        for o in self.iter() {
+            if discriminant(o) == option_discriminant {
+                return Some(o.clone());
+            }
+        }
+
+        None
+    }
+
+    /// This Function checks new options and old options and if something is different in the new options or if there is a completely new option
+    /// then we add it to the differences that are returned at the end
+    pub fn compare<'a>(
+        new_options: &'a [DhcpOption],
+        old_options: &'a [DhcpOption],
+    ) -> Box<[(Option<&'a DhcpOption>, &'a DhcpOption)]> {
+        use std::mem::discriminant;
+
+        let mut differences: Vec<(Option<&DhcpOption>, &DhcpOption)> = Vec::new();
+
+        for new_o in new_options {
+            let old_o = old_options
+                .iter()
+                .find(|o| discriminant(*o) == discriminant(new_o));
+            match old_o {
+                Some(old_o) => {
+                    if new_o != old_o {
+                        differences.push((Some(old_o), new_o));
+                    }
+                }
+                None => {
+                    differences.push((None, new_o));
+                }
+            }
+        }
+
+        differences.into_boxed_slice()
+    }
+
+    pub fn combine(
+        new_options: &[DhcpOption],
+        old_options: &[DhcpOption],
+    ) -> Self {
+        use std::mem::discriminant;
+
+        let mut result: Vec<DhcpOption> = Vec::from(new_options);
+
+        for old_o in old_options {
+            let d = discriminant(old_o);
+            if !result.iter().any(|o| discriminant(o) == d) {
+                result.push(old_o.clone());
+            }
+        }
+
+        DhcpOptions(result.into())
     }
 }
 

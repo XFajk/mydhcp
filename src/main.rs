@@ -11,7 +11,8 @@ use std::{
     env::args,
     net::Ipv4Addr,
     rc::Rc,
-    sync::atomic::{AtomicBool, Ordering}, time::Duration,
+    sync::atomic::{AtomicBool, Ordering},
+    time::Duration,
 };
 
 use dhcp_help::*;
@@ -101,21 +102,21 @@ enum DhcpClient {
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
-        dhcp_options: Rc<[DhcpOption]>,
+        dhcp_options: DhcpOptions,
     },
     Requesting {
         socket: Rc<RawSocket>,
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
-        offered_dhcp_options: Rc<[DhcpOption]>,
+        offered_dhcp_options: DhcpOptions,
     },
     ReceivedAcknowledgment {
         socket: Rc<RawSocket>,
         transaction_id: u32,
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
-        acknowledged_options: Rc<[DhcpOption]>,
+        acknowledged_options: DhcpOptions,
     },
     Active {
         socket: Rc<RawSocket>,
@@ -123,7 +124,7 @@ enum DhcpClient {
         ip: Ipv4Addr,
         server_ip: Ipv4Addr,
         net_config: NetConfigManager,
-        acknowledged_options: Rc<[DhcpOption]>,
+        acknowledged_options: DhcpOptions,
         renewal_deadline: std::time::Instant,
         rebinding_deadline: std::time::Instant,
         expiration_deadline: std::time::Instant,
@@ -163,7 +164,10 @@ impl DhcpClient {
                 });
 
             info!(target: "mydhcp::connect", "- Creating a Socket for DHCP comunication on interface: {}", interface_name);
-            let socket = Rc::new(RawSocket::bind(interface_name, Some(Duration::from_secs(1)))?);
+            let socket = Rc::new(RawSocket::bind(
+                interface_name,
+                Some(Duration::from_secs(1)),
+            )?);
             socket.set_filter_command("udp port 68 or udp port 67")?;
 
             Ok(Self::Connected { socket })
@@ -219,20 +223,18 @@ impl DhcpClient {
         } = self
         {
             info!(target: "mydhcp::receive_offer", "Waiting for DHCP Offer packet");
-            let response = unsafe {
-                Self::get_dhcp_response(
-                    &socket,
-                    transaction_id,
-                    std::time::Duration::from_secs(10),
-                )?
-            };
+            let response = Self::get_dhcp_response(
+                &socket,
+                transaction_id,
+                DhcpMessage::Offer,
+                std::time::Duration::from_secs(10),
+            )?;
+
             info!(target: "mydhcp::receive_offer", "- Received DHCP Offer packet");
 
             info!(target: "mydhcp::receive_offer", "- Parsing DHCP options from the response");
-            let dhcp_options = DhcpOption::parse_dhcp_options(&response.dhcp_options)
+            let dhcp_options = DhcpOptions::parse_dhcp_options(&response.dhcp_options)
                 .ok_or(DhcpClientError::DhcpOptionParsingError)?;
-
-            // TODO: check if the DHCP options contain the correct DHCP option aka make sure it is an DHCP Offer
 
             let server_ip = match (*dhcp_options)
                 .iter()
@@ -297,7 +299,7 @@ impl DhcpClient {
                 transaction_id,
                 ip,
                 server_ip,
-                offered_dhcp_options: Rc::clone(dhcp_options),
+                offered_dhcp_options: dhcp_options.clone(),
             })
         } else {
             Err(DhcpClientError::DhcpInvalidState)
@@ -315,23 +317,21 @@ impl DhcpClient {
         } = self
         {
             info!(target: "mydhcp::receive_acknowledgement", "Waiting for DHCP Acknowledgment packet");
-            let acknowledgement = unsafe {
-                Self::get_dhcp_response(
-                    &socket,
-                    transaction_id,
-                    std::time::Duration::from_secs(10),
-                )?
-            };
+            let acknowledgement = Self::get_dhcp_response(
+                &socket,
+                transaction_id,
+                DhcpMessage::Acknowledge,
+                std::time::Duration::from_secs(10),
+            )?;
+
             info!(target: "mydhcp::receive_acknowledgement", "- Received DHCP Acknowledgment packet");
 
-            // TODO: check if the DHCP options contain the correct DHCP option aka make sure it is an DHCP Offer
-
             info!(target: "mydhcp::receive_acknowledgement", "- Parsing DHCP options from the acknowledgment");
-            let dhcp_options = DhcpOption::parse_dhcp_options(&acknowledgement.dhcp_options)
+            let dhcp_options = DhcpOptions::parse_dhcp_options(&acknowledgement.dhcp_options)
                 .ok_or(DhcpClientError::DhcpOptionParsingError)?;
 
             info!(target: "mydhcp::receive_acknowledgement", "- Analyzing differences DHCP options from the offer and acknowledgment");
-            let differences = compare_dhcp_options(&dhcp_options, &offered_dhcp_options);
+            let differences = DhcpOptions::compare(&dhcp_options, &offered_dhcp_options);
             println!(
                 "The following options were added or changed from the offer to the acknowledgment:"
             );
@@ -339,7 +339,7 @@ impl DhcpClient {
                 println!("{:?} -> {:?}", diff.0, diff.1);
             }
 
-            let acknowledged_options = combine_dhcp_options(&dhcp_options, &offered_dhcp_options);
+            let acknowledged_options = DhcpOptions::combine(&dhcp_options, &offered_dhcp_options);
 
             Ok(DhcpClient::ReceivedAcknowledgment {
                 socket: Rc::clone(socket),
@@ -479,7 +479,7 @@ impl DhcpClient {
             info!(target: "mydhcp::activate", "- Configuring the network with the received options");
             let mut net_config = NetConfigManager::new(&socket.interface)?;
             net_config.set_ip_and_mask(ip, mask.unwrap_or(Ipv4Addr::UNSPECIFIED))?;
-            
+
             if let Some(gateways) = gateways {
                 net_config.set_gateway(
                     gateways
@@ -498,7 +498,7 @@ impl DhcpClient {
                 ip,
                 server_ip,
                 net_config,
-                acknowledged_options: Rc::clone(acknowledged_options),
+                acknowledged_options: acknowledged_options.clone(),
                 renewal_deadline,
                 rebinding_deadline,
                 expiration_deadline,
@@ -540,7 +540,7 @@ impl DhcpClient {
                 transaction_id,
                 ip,
                 server_ip,
-                dhcp_options: Rc::clone(&acknowledged_options),
+                dhcp_options: acknowledged_options.clone(),
             }
             .retry_requesting();
 
@@ -573,7 +573,7 @@ impl DhcpClient {
                 transaction_id,
                 ip,
                 server_ip: Ipv4Addr::BROADCAST,
-                dhcp_options: Rc::clone(&acknowledged_options),
+                dhcp_options: acknowledged_options.clone(),
             }
             .retry_requesting();
 
@@ -613,12 +613,10 @@ impl DhcpClient {
 }
 
 impl DhcpClient {
-    /// REDO! this code is really bad it is very unsafe it only check
-    /// if the packet is UDP and that is it and I think it should do more checks
-    /// also it should probably return more than one packet
-    unsafe fn get_dhcp_response(
+    fn get_dhcp_response(
         socket: &RawSocket,
         transaction_id: u32,
+        wanted_message_type: DhcpMessage,
         time_out: std::time::Duration,
     ) -> Result<DhcpPayload, error::DhcpClientError> {
         let is_desired_packet = |packet: SlicedPacket| -> Option<DhcpPayload> {
@@ -633,6 +631,18 @@ impl DhcpClient {
                 return None;
             }
 
+            if let Some(dhcp_options) = DhcpOptions::parse_dhcp_options(&dhcp_payload.dhcp_options)
+            {
+                let message_type = dhcp_options.search_for_option(std::mem::discriminant(
+                    &DhcpOption::DhcpMessageType(DhcpMessage::Unsupported),
+                ))?;
+                if let DhcpOption::DhcpMessageType(t) = message_type {
+                    if t != wanted_message_type {
+                        return None;
+                    }
+                }
+            }
+
             Some(dhcp_payload)
         };
 
@@ -640,7 +650,15 @@ impl DhcpClient {
 
         while elapsed_time.elapsed() < time_out {
             shutdown_on_signal()?;
-            let (data, _) = socket.recv_from()?;
+            let (data, _) = match socket.recv_from() {
+                Ok(data_and_addr) => data_and_addr,
+                Err(e) => {
+                    if e.kind() == std::io::ErrorKind::WouldBlock {
+                        continue;
+                    }
+                    return Err(e.into());
+                }
+            };
             let data = Rc::from(data);
 
             match SlicedPacket::from_ethernet(&data) {
@@ -668,7 +686,7 @@ impl Drop for DhcpClient {
             transaction_id,
             ..
         } = self
-        { 
+        {
             info!(target: "mydhcp::drop", "Sending DHCP Release packet");
 
             let packet_builder = PacketBuilder::ethernet2(
@@ -701,53 +719,6 @@ impl Drop for DhcpClient {
                 });
         }
     }
-}
-
-/// This Function checks new options and old options and if something is different in the new options or if there is a completely new option
-/// then we add it to the differences that are returned at the end
-fn compare_dhcp_options<'a>(
-    new_options: &'a [DhcpOption],
-    old_options: &'a [DhcpOption],
-) -> Box<[(Option<&'a DhcpOption>, &'a DhcpOption)]> {
-    use std::mem::discriminant;
-
-    let mut differences: Vec<(Option<&DhcpOption>, &DhcpOption)> = Vec::new();
-
-    for new_o in new_options {
-        let old_o = old_options
-            .iter()
-            .find(|o| discriminant(*o) == discriminant(new_o));
-        match old_o {
-            Some(old_o) => {
-                if new_o != old_o {
-                    differences.push((Some(old_o), new_o));
-                }
-            }
-            None => {
-                differences.push((None, new_o));
-            }
-        }
-    }
-
-    differences.into_boxed_slice()
-}
-
-fn combine_dhcp_options(
-    new_options: &[DhcpOption],
-    old_options: &[DhcpOption],
-) -> Rc<[DhcpOption]> {
-    use std::mem::discriminant;
-
-    let mut result: Vec<DhcpOption> = Vec::from(new_options);
-
-    for old_o in old_options {
-        let d = discriminant(old_o);
-        if !result.iter().any(|o| discriminant(o) == d) {
-            result.push(old_o.clone());
-        }
-    }
-
-    result.into()
 }
 
 fn wait_until_with_abort(deadline: std::time::Instant) -> Result<(), DhcpClientError> {
