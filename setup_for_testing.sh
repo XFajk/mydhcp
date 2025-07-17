@@ -6,6 +6,9 @@ SSID=$1
 PASS=$2
 IFACE=$3
 
+RESOLV_SYMLINK="/etc/resolv.conf"
+RESOLV_TARGET="/run/systemd/resolve/stub-resolv.conf"
+
 # Simple sanity check for required params when SET_FOR_TESTING=1
 if [ "$SET_FOR_TESTING" = "1" ]; then
     if [ -z "$SSID" ] || [ -z "$PASS" ] || [ -z "$IFACE" ]; then
@@ -19,6 +22,17 @@ if [ "$SET_FOR_TESTING" = "1" ]; then
 
     # Stop NetworkManager (you might need sudo)
     sudo systemctl stop NetworkManager
+    sudo systemctl stop systemd-resolved
+
+    # Remove /etc/resolv.conf if it's a symlink
+    if [ -L "$RESOLV_SYMLINK" ]; then
+        echo "Removing /etc/resolv.conf symlink..."
+        sudo rm "$RESOLV_SYMLINK"
+    fi
+
+    # Create new empty resolv.conf file
+    echo "Creating standalone /etc/resolv.conf..."
+    echo "# Created by mydhcp/setup_for_testing.sh for manual DNS control" | sudo tee "$RESOLV_SYMLINK" > /dev/null
 
     # Kill any running wpa_supplicant on the interface (cleanup)
     sudo pkill -f "wpa_supplicant.*$IFACE"
@@ -58,7 +72,20 @@ elif [ "$SET_FOR_TESTING" = "0" ]; then
         sudo ip link set "$IFACE" up
     fi
 
-    # Start and start NetworkManager again
+    # Remove custom /etc/resolv.conf if it exists
+    if [ -f "$RESOLV_SYMLINK" ] && [ ! -L "$RESOLV_SYMLINK" ]; then
+        echo "Removing temporary /etc/resolv.conf..."
+        sudo rm "$RESOLV_SYMLINK"
+    fi
+
+    # Restore systemd's symlink
+    if [ ! -L "$RESOLV_SYMLINK" ]; then
+        echo "Restoring /etc/resolv.conf symlink..."
+        sudo ln -s "$RESOLV_TARGET" "$RESOLV_SYMLINK"
+    fi
+
+    # Restart NetworkManager and systemd-resolved
+    sudo systemctl start systemd-resolved
     sudo systemctl start NetworkManager
 
     echo "NetworkManager restarted, normal operation resumed."
