@@ -2,6 +2,14 @@
 name = "mydhcp"
 version = "0.1.0"
 edition = "2024"
+description = "A minimal DHCP client implemented in Rust."
+license = "MIT"
+repository = "https://github.com/XFajk/mydhcp"
+homepage = "https://github.com/XFajk/mydhcp"
+documentation = "https://github.com/XFajk/mydhcp#readme"
+readme = "README.md"
+keywords = ["dhcp", "networking", "client", "rust"]
+categories = ["network-programming", "command-line-utilities"]
 
 [dependencies]
 ctrlc = "3.4.7"
