@@ -131,6 +131,27 @@ enum DhcpClient {
 }
 
 impl DhcpClient {
+    /// Establishes a complete DHCP connection, transitioning through
+    /// DISCOVER → OFFER → REQUEST → ACKNOWLEDGE → ACTIVE states.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Command-line arguments; must include the interface name at `args[1]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DhcpClientError`] if:
+    /// - No interface name is provided.
+    /// - Socket creation or sending fails.
+    /// - DHCP response is malformed or missing options.
+    /// - Any required system call (like ioctl or send/recv) fails.
+    /// - The client is interrupted by a shutdown signal.
+    /// - and generaly you can look at the [`src/error.rs`] becaue it returns all of them
+    ///
+    /// # Panics
+    ///
+    /// Panics if the interface name is missing 
+    /// 
     fn establish_dhcp_connection(args: &[String]) -> Result<Self, DhcpClientError> {
         DhcpClient::new()
             .connect(args)?
@@ -141,14 +162,45 @@ impl DhcpClient {
             .activate()
     }
 
+    /// Attempts to reissue a DHCP request and re-activate the client using
+    /// existing offer information.
+    ///
+    /// # Errors
+    ///
+    /// Returns a [`DhcpClientError`] if:
+    /// - The request or acknowledgment fails.
+    /// - The client is not in a requestable state.
+    ///
     fn retry_requesting(self) -> Result<Self, DhcpClientError> {
         self.request()?.receive_acknowledgement()?.activate()
     }
 
+    /// Creates a new DHCP client instance in a disconnected state.
+    ///
+    ///
+    /// # Returns
+    ///
+    /// A `DhcpClient` in the `Disconnected` state, ready to begin connection.
     fn new() -> Self {
         Self::Disconnected
     }
 
+    /// Transitions the DHCP client from `Disconnected` to `Connected` state by
+    /// creating and configuring a raw socket.
+    ///
+    /// # Arguments
+    ///
+    /// * `args` - Command-line arguments; must include the interface name at `args[1]`.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `DhcpClientError` if:
+    /// - No interface name is provided.
+    /// - The interface name is invalid.
+    /// - Raw socket creation fails.
+    /// - BPF filter setup fails.
+    /// - The client is not in `Disconnected` state.
+    ///
     fn connect(self, args: &[String]) -> Result<Self, DhcpClientError> {
         shutdown_on_signal()?;
         if let Self::Disconnected = self {
@@ -175,6 +227,15 @@ impl DhcpClient {
         }
     }
 
+    /// Sends a DHCP Discover packet to the network to initiate lease negotiation.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `DhcpClientError` if:
+    /// - The client is not in the `Connected` state.
+    /// - Packet construction or sending fails.
+    /// - System time is invalid.
+    ///
     fn discover(self) -> Result<Self, error::DhcpClientError> {
         shutdown_on_signal()?;
         if let Self::Connected { ref socket } = self {
@@ -214,6 +275,15 @@ impl DhcpClient {
         }
     }
 
+    /// Waits for and processes a DHCP Offer packet from a server.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `DhcpClientError` if:
+    /// - The client is not in `Discovering` state.
+    /// - Packet parsing or validation fails.
+    /// - Required options are missing.
+    ///
     fn receive_offer(self) -> Result<Self, DhcpClientError> {
         shutdown_on_signal()?;
         if let Self::Discovering {
@@ -260,6 +330,14 @@ impl DhcpClient {
         }
     }
 
+    /// Sends a DHCP Request packet to the server to accept the offered IP.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `DhcpClientError` if:
+    /// - The client is not in `ReceivedOffer` state.
+    /// - Packet creation or transmission fails.
+    ///
     fn request(self) -> Result<Self, DhcpClientError> {
         shutdown_on_signal()?;
         if let DhcpClient::ReceivedOffer {
@@ -304,6 +382,19 @@ impl DhcpClient {
         }
     }
 
+    /// Receives and validates a DHCP Acknowledgment from the server.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `DhcpClientError` if:
+    /// - The client is not in `Requesting` state.
+    /// - Receiving or parsing the packet fails.
+    /// - The acknowledgment contains invalid or mismatching options.
+    ///
+    /// # Panics
+    ///
+    /// This function assumes consistent option structure from DHCP OFFER to ACK. If mismatched,
+    /// it may panic in `match` arms that assume specific variants.
     fn receive_acknowledgement(self) -> Result<Self, DhcpClientError> {
         shutdown_on_signal()?;
         if let DhcpClient::Requesting {
@@ -350,6 +441,21 @@ impl DhcpClient {
             Err(DhcpClientError::DhcpInvalidState)
         }
     }
+    
+    /// Finalizes the DHCP handshake by configuring the local network interface with received options.
+    ///
+    /// Applies IP, subnet mask, gateway, DNS, and lease timing from the ACK packet.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `DhcpClientError` if:
+    /// - The client is not in `ReceivedAcknowledgment` state.
+    /// - Required DHCP options are missing.
+    /// - System-level configuration (e.g., setting IP or gateway) fails.
+    ///
+    /// # Panics
+    ///
+    /// This function may panic if certain expected DHCP options are missing despite earlier checks.
     fn activate(self) -> Result<Self, DhcpClientError> {
         shutdown_on_signal()?;
         if let DhcpClient::ReceivedAcknowledgment {
@@ -496,6 +602,37 @@ impl DhcpClient {
         }
     }
 
+    /// Manages DHCP lease lifecycle by renewing it before expiration.
+    ///
+    /// Waits until renewal (T1) and rebinding (T2) deadlines. Attempts unicast
+    /// and then broadcast DHCP Request packets to extend the lease.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `DhcpClientError` if:
+    /// - Lease renewal or rebinding fails.
+    /// - Shutdown is triggered during any phase.
+    ///
+    /// # Panics
+    ///
+    /// None directly, but unsafe manual drops are used for early resource release.
+    /// 
+    /// # Safety
+    ///
+    /// This function uses more `unsafe` code than others because it manually prevents `Drop`
+    /// from being called on `self` until renewal logic completes.
+    ///
+    /// When this function is called, `self` must be in the `Active` state. Normally, when `self` goes
+    /// out of scope, it would trigger the [`Drop`] implementation — which sends a `DHCPRELEASE` to the server.
+    ///
+    /// However, in the renewal process, releasing the lease would be incorrect if the renewal
+    /// succeeds. To prevent this, `self` is wrapped in [`std::mem::ManuallyDrop`], and we only explicitly
+    /// `drop` individual fields or the full object when needed.
+    ///
+    /// This makes the function potentially fragile: forgetting to drop something manually or
+    /// dropping it twice could lead to memory unsafety. Although care has been taken to avoid mistakes,
+    /// manual memory management is error-prone, and this function should be treated with extra scrutiny.
+    /// 
     fn keep_track(self) -> Result<Self, DhcpClientError> {
         use std::mem::ManuallyDrop;
         use std::ptr::drop_in_place;
@@ -709,6 +846,31 @@ impl Drop for DhcpClient {
     }
 }
 
+/// Sleeps in intervals until a given deadline is reached, unless interrupted by shutdown.
+///
+/// This function is commonly used to wait for DHCP lease renewal points
+/// (e.g., T1, T2, or expiration) while allowing graceful shutdown handling.
+///
+/// # Arguments
+///
+/// * `deadline` - The `Instant` until which the function should wait.
+///
+/// # Returns
+///
+/// Returns `Ok(())` if the deadline was reached without interruption.
+///
+/// # Errors
+///
+/// Returns `Err(DhcpClientError::ShutdownSignalReceived)` if a shutdown signal
+/// is received during waiting.
+///
+/// # Examples
+///
+/// ```
+/// let deadline = std::time::Instant::now() + std::time::Duration::from_secs(1);
+/// wait_until_with_abort(deadline).unwrap();
+/// ```
+/// 
 fn wait_until_with_abort(deadline: std::time::Instant) -> Result<(), DhcpClientError> {
     use std::time::*;
 
@@ -722,6 +884,25 @@ fn wait_until_with_abort(deadline: std::time::Instant) -> Result<(), DhcpClientE
     Ok(())
 }
 
+/// Checks whether a shutdown signal has been received.
+///
+/// This function is used throughout the client logic to abort long-running
+/// operations if a shutdown signal (e.g., SIGINT) has been triggered.
+///
+/// # Returns
+///
+/// Returns `Ok(())` if no shutdown signal has been received.
+///
+/// # Errors
+///
+/// Returns `Err(DhcpClientError::ShutdownSignalReceived)` if a shutdown signal
+/// was detected.
+///
+/// # Examples
+///
+/// ```
+/// shutdown_on_signal().unwrap();
+/// ```
 fn shutdown_on_signal() -> Result<(), DhcpClientError> {
     if SHOULD_SHUTDOWN.load(Ordering::SeqCst) {
         Err(DhcpClientError::ShutdownSignalReceived)

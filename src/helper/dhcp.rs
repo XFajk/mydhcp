@@ -1,3 +1,16 @@
+//! DHCP Helper Module
+//!
+//! This module provides structured abstractions over raw DHCP packets,
+//! allowing for parsing, composing, comparing, and serializing DHCP data.
+//!
+//! It defines:
+//! - `DhcpMessage`: Enumeration of message types
+//! - `DhcpOption`: Strongly typed variants for supported DHCP options
+//! - `DhcpOptions`: Utility wrapper for searching, comparing, and combining options
+//! - `DhcpPayload`: A full DHCP packet (header + options), with support for discovery, request, release and deserialization
+//!
+//! Used throughout the DHCP client to construct, parse, and reason about protocol data.
+
 use etherparse::{SlicedPacket, TransportSlice};
 use mac_address::mac_address_by_name;
 use std::{
@@ -21,6 +34,13 @@ pub enum DhcpMessage {
     Unsupported = 0,
 }
 
+/// Represents a DHCP option with a strongly-typed variant.
+///
+/// This enum abstracts over raw DHCP option bytes, converting them into
+/// safe, structured Rust values that can be matched and manipulated.
+///
+/// Options are parsed from `(u8, Vec<u8>)` tuples and support conversion
+/// back into byte arrays with [`DhcpOption::into_bytes`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DhcpOption {
     SubnetMask(Ipv4Addr),             // 1
@@ -42,6 +62,17 @@ pub enum DhcpOption {
     UnsupportedOption(u8, Rc<[u8]>),  // any other
 }
 
+/// Converts a raw DHCP option tuple `(code, data)` into a typed `DhcpOption` enum.
+///
+/// This parser handles known codes (1, 3, 6, 12, 15, 28, 50, etc.) and converts them
+/// into structured variants. Unknown codes are stored in `UnsupportedOption`.
+///
+/// # Examples
+///
+/// ```
+/// let option = DhcpOption::from((1, vec![255, 255, 255, 0]));
+/// assert_eq!(option, DhcpOption::SubnetMask(Ipv4Address::new(255, 255, 255, 0)));
+/// ```
 impl From<(u8, Vec<u8>)> for DhcpOption {
     fn from(value: (u8, Vec<u8>)) -> Self {
         let (code, data) = value;
@@ -116,6 +147,11 @@ impl From<(u8, Vec<u8>)> for DhcpOption {
 }
 
 impl DhcpOption {
+    /// Converts a slice of `DhcpOption`s into a serialized byte array.
+    ///
+    /// This is used to encode options when constructing DHCP packets.
+    ///
+    /// Ensures the resulting sequence ends with the `End (255)` option if not already present.
     pub fn into_bytes(options: &[Self]) -> Rc<[u8]> {
         let mut bytes = Vec::new();
         for option in options {
@@ -212,6 +248,13 @@ impl DhcpOption {
     }
 }
 
+/// A wrapper around a reference-counted slice of [`DhcpOption`] values.
+///
+/// Provides helper methods to:
+/// - Parse options from raw bytes
+/// - Search for an option by type
+/// - Compare two option lists
+/// - Combine new and old options
 #[derive(Debug, Clone)]
 pub struct DhcpOptions(Rc<[DhcpOption]>);
 
@@ -230,6 +273,12 @@ impl DerefMut for DhcpOptions {
 }
 
 impl DhcpOptions {
+    /// Parses raw DHCP option bytes into a structured `DhcpOptions` wrapper.
+    ///
+    /// # Returns
+    ///
+    /// Returns `Some(DhcpOptions)` if parsing succeeds. Returns `None` if
+    /// any offset/index is out of bounds or formatting is invalid.
     pub fn parse_dhcp_options(options: &[u8]) -> Option<Self> {
         let mut result = Vec::<DhcpOption>::new();
 
@@ -253,6 +302,9 @@ impl DhcpOptions {
         Some(DhcpOptions(result.into()))
     }
 
+    /// Searches for a DHCP option by discriminant and returns a clone if found.
+    ///
+    /// Used to find a specific option like `DhcpMessageType` or `ServerId` in the list.
     pub fn search(&self, option_discriminant: Discriminant<DhcpOption>) -> Option<DhcpOption> {
         for o in self.iter() {
             if discriminant(o) == option_discriminant {
@@ -263,8 +315,13 @@ impl DhcpOptions {
         None
     }
 
-    /// This Function checks new options and old options and if something is different in the new options or if there is a completely new option
-    /// then we add it to the differences that are returned at the end
+    /// Compares two DHCP option lists and returns all differing or new options.
+    ///
+    /// Each entry in the result is a tuple:
+    /// - `Some(&old)` if the option existed but changed
+    /// - `None` if the option is entirely new
+    ///
+    /// Used to track configuration changes during renewal.
     pub fn compare<'a>(
         new_options: &'a [DhcpOption],
         old_options: &'a [DhcpOption],
@@ -292,6 +349,10 @@ impl DhcpOptions {
         differences.into_boxed_slice()
     }
 
+    /// Combines new and old DHCP options by appending only non-duplicate entries from old.
+    ///
+    /// If a new option already includes a variant, it is not overridden.
+    /// Preserves all options present in the newer set.
     pub fn combine(new_options: &[DhcpOption], old_options: &[DhcpOption]) -> Self {
         use std::mem::discriminant;
 
@@ -308,6 +369,13 @@ impl DhcpOptions {
     }
 }
 
+/// A full DHCP packet structure containing both the fixed header and dynamic options.
+///
+/// Used to build and serialize DHCP packets for DISCOVER, REQUEST, and RELEASE messages.
+///
+/// The fields directly map to the DHCP packet format as described in RFC 2131.
+///
+/// Use `DhcpPayload::to_bytes` to serialize, and `DhcpPayload::from_bytes` to parse from a buffer.
 #[derive(Clone, Debug)]
 pub struct DhcpPayload {
     op: u8,
@@ -329,6 +397,23 @@ pub struct DhcpPayload {
 }
 
 impl DhcpPayload {
+    /// Constructs a DHCP DISCOVER packet for the given interface and transaction ID.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface_name` - Network interface to derive the MAC address from.
+    /// * `transaction_id` - Unique identifier for the DHCP exchange.
+    /// * `requested_ip` - Optional IP address the client wishes to request.
+    ///
+    /// # Returns
+    ///
+    /// A `DhcpPayload` representing the DISCOVER message.
+    ///
+    /// # Panics
+    ///
+    /// This function panics if the MAC address for the interface cannot be resolved
+    /// (via `mac_address_by_name(...).unwrap().unwrap()`).
+    /// 
     pub fn discover(
         interface_name: &str,
         transaction_id: u32,
@@ -364,6 +449,23 @@ impl DhcpPayload {
         discover_payload
     }
 
+    /// Constructs a DHCP REQUEST packet for a previously offered IP.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface_name` - Network interface used to get MAC address.
+    /// * `transaction_id` - The same transaction ID from the DISCOVER phase.
+    /// * `ip` - The offered IP address the client wants to request.
+    /// * `server_ip` - The IP of the DHCP server to send the request to.
+    ///
+    /// # Returns
+    ///
+    /// A `DhcpPayload` representing the REQUEST message.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the MAC address cannot be retrieved (via `.unwrap().unwrap()`).
+    /// 
     pub fn request(
         interface_name: &str,
         transaction_id: u32,
@@ -400,6 +502,23 @@ impl DhcpPayload {
         request_payload
     }
 
+    /// Constructs a DHCP RELEASE packet to relinquish a leased IP.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface_name` - Interface from which to get the MAC address.
+    /// * `transaction_id` - Transaction ID used during the lease.
+    /// * `ip` - The IP address to release.
+    /// * `server_ip` - The DHCP server's IP address.
+    ///
+    /// # Returns
+    ///
+    /// A `DhcpPayload` representing the RELEASE message.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the MAC address retrieval fails (`unwrap().unwrap()` on result of `mac_address_by_name`).
+    /// 
     pub fn release(
         interface_name: &str,
         transaction_id: u32,
@@ -436,6 +555,14 @@ impl DhcpPayload {
         release_payload
     }
 
+    /// Serializes the `DhcpPayload` into a byte array ready for transmission.
+    ///
+    /// Converts all header fields and DHCP options to network byte order.
+    ///
+    /// # Returns
+    ///
+    /// A boxed byte slice containing the full DHCP message.
+    ///
     pub fn to_bytes(&self) -> Box<[u8]> {
         let mut data = Vec::<u8>::new();
         data.push(self.op.to_be());
@@ -464,6 +591,17 @@ impl DhcpPayload {
         data.into_boxed_slice()
     }
 
+    /// Parses a byte slice into a `DhcpPayload`.
+    ///
+    /// # Safety
+    ///
+    /// This function is `unsafe` because it performs unchecked indexing and assumes
+    /// the byte layout is correct and complete per RFC2131.
+    ///
+    /// # Returns
+    ///
+    /// `Some(DhcpPayload)` if parsing succeeds; otherwise `None`.
+    /// 
     pub unsafe fn from_bytes(bytes: &[u8]) -> Option<Self> {
         Some(Self {
             op: *bytes.get(0)?,
@@ -485,6 +623,18 @@ impl DhcpPayload {
         })
     }
 
+    /// Attempts to parse a `DhcpPayload` from a sliced UDP packet.
+    ///
+    /// # Safety
+    ///
+    /// This function is `unsafe` because it forwards to `from_bytes`, which assumes
+    /// the buffer layout matches the DHCP protocol.
+    ///
+    /// # Returns
+    ///
+    /// `Some(DhcpPayload)` if the transport layer is UDP and payload is well-formed.
+    /// `None` if the slice is not UDP or the payload fails to parse.
+    /// 
     pub unsafe fn from_sliced_packet(sliced: SlicedPacket<'_>) -> Option<Self> {
         if let Some(TransportSlice::Udp(udp_slice)) = sliced.transport {
             unsafe { Self::from_bytes(udp_slice.payload()) }

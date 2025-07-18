@@ -1,3 +1,16 @@
+//! Socket Helper Module
+//!
+//! Provides safe and ergonomic abstractions over low-level raw socket handling,
+//! specifically AF_PACKET sockets used to send and receive Ethernet frames.
+//!
+//! Exposes:
+//! - `SocketFd`: A RAII wrapper over `RawFd` with timeout handling.
+//! - `RawSocket`: High-level interface for AF_PACKET sockets with support for binding,
+//!    filtering, sending and receiving raw Ethernet frames.
+//!
+//! The abstractions wrap libc syscalls like `socket`, `bind`, `setsockopt`, and `recvfrom`
+//! to provide a higher-level Rust interface.
+
 use std::{
     ffi::CString,
     ops::Deref,
@@ -11,11 +24,23 @@ use pcap::Capture;
 
 use crate::error::{self, DhcpClientError};
 
+/// RAII wrapper around a raw file descriptor.
+///
+/// Automatically closes the file descriptor on drop. Also supports socket-level
+/// timeout configuration via `setsockopt`.
 #[derive(Debug)]
 pub struct SocketFd(RawFd);
 
 impl SocketFd {
-    /// Set a receive timeout on a socket
+    /// Set a receive timeout on the socket using `SO_RCVTIMEO`.
+    ///
+    /// # Arguments
+    ///
+    /// * `timeout` - Duration after which `recv` operations will time out.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the setsockopt syscall fails.
     pub fn set_socket_timeout(&self, timeout: Duration) -> std::io::Result<()> {
         let tv = libc::timeval {
             tv_sec: timeout.as_secs() as libc::time_t,
@@ -39,7 +64,11 @@ impl SocketFd {
         }
     }
 
-    /// Remove (clear) the socket timeout by setting it to 0
+    /// Clears the socket receive timeout by setting it to zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the setsockopt syscall fails.
     pub fn clear_socket_timeout(&self) -> std::io::Result<()> {
         let tv = libc::timeval {
             tv_sec: 0,
@@ -92,6 +121,11 @@ impl Drop for SocketFd {
     }
 }
 
+/// High-level abstraction over a Linux AF_PACKET raw socket.
+///
+/// Encapsulates socket creation, interface binding, BPF filtering, and Ethernet frame I/O.
+///
+/// Used to construct and communicate at the link-layer (Ethernet) level.
 #[derive(Debug)]
 pub struct RawSocket {
     fd: SocketFd,
@@ -101,6 +135,17 @@ pub struct RawSocket {
 }
 
 impl RawSocket {
+    /// Creates and binds an AF_PACKET socket to the given interface.
+    ///
+    /// # Arguments
+    ///
+    /// * `interface_name` - Name of the interface to bind the socket to.
+    /// * `timeout` - Optional receive timeout for the socket.
+    ///
+    /// # Returns
+    ///
+    /// Returns a `RawSocket` on success, or a `DhcpClientError` on failure.
+
     pub fn bind(interface_name: &str, timeout: Option<Duration>) -> Result<Self, DhcpClientError> {
         use mac_address::mac_address_by_name;
 
@@ -164,6 +209,15 @@ impl RawSocket {
         })
     }
 
+    /// Applies a precompiled raw BPF filter to the socket.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter_code` - Mutable reference to a slice of `libc::sock_filter` instructions.
+    ///
+    /// # Errors
+    ///
+    /// Returns a `std::io::Error` if the setsockopt syscall fails.
     pub fn set_filter(&self, filter_code: &mut [libc::sock_filter]) -> std::io::Result<()> {
         let filter_program = libc::sock_fprog {
             len: filter_code.len() as u16,
@@ -187,6 +241,15 @@ impl RawSocket {
         }
     }
 
+    /// Compiles and applies a textual BPF filter using libpcap and attaches it to the socket.
+    ///
+    /// # Arguments
+    ///
+    /// * `filter_cmd` - A BPF expression (e.g., `"udp and port 67"`).
+    ///
+    /// # Errors
+    ///
+    /// Returns a `DhcpClientError` if filter compilation or application fails.
     pub fn set_filter_command(&self, filter_cmd: &str) -> Result<(), error::DhcpClientError> {
         let capture = Capture::from_device::<&str>(&self.interface)?.open()?;
 
@@ -199,6 +262,16 @@ impl RawSocket {
         Ok(())
     }
 
+    /// Sends a raw Ethernet frame to the specified destination MAC address.
+    ///
+    /// # Arguments
+    ///
+    /// * `frame_data` - The full Ethernet frame to send.
+    /// * `destination_mac_addr` - 6-byte destination MAC address.
+    ///
+    /// # Returns
+    ///
+    /// Number of bytes sent on success, or an I/O error on failure.
     pub fn send_to(
         &self,
         frame_data: &[u8],
@@ -233,6 +306,15 @@ impl RawSocket {
         }
     }
 
+    /// Receives a raw Ethernet frame and its source address.
+    ///
+    /// # Returns
+    ///
+    /// A tuple of `(frame_bytes, sockaddr_ll)` representing the received frame and source info.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if `recvfrom` fails.
     pub fn recv_from(&self) -> std::io::Result<(Vec<u8>, libc::sockaddr_ll)> {
         let mut frame_data: Vec<u8> = Vec::with_capacity(4096);
         let mut frame_source_addr: libc::sockaddr_ll = unsafe { std::mem::zeroed() };
