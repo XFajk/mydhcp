@@ -1,7 +1,5 @@
-mod dhcp_help;
 mod error;
-mod netconfig_help;
-mod socket_help;
+mod helper;
 
 use core::panic;
 use error::DhcpClientError;
@@ -16,10 +14,10 @@ use std::{
     time::Duration,
 };
 
-use dhcp_help::*;
-use socket_help::RawSocket;
+use helper::dhcp::*;
+use helper::socket::RawSocket;
 
-use crate::netconfig_help::NetConfigManager;
+use helper::netconfig::NetConfigManager;
 
 static SHOULD_SHUTDOWN: AtomicBool = AtomicBool::new(false);
 

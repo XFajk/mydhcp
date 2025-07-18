@@ -90,8 +90,7 @@ impl NetConfigManager {
 
         self.gateway = None;
 
-        if let None = self.ip
-            && let None = self.mask
+        if self.ip.is_none() && self.mask.is_none()
         {
             info!(target: "mydhcp::netconfig::cleanup", "- No ip and mask set, skipping their removal");
             return Ok(());
