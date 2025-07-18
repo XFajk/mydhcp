@@ -75,9 +75,7 @@ SET_FOR_TESTING=0 ./setup_for_testing.sh
 
 ## 📋 Documentation
 
-Full integration design and internals are described in DESIGN.md (coming soon).
-
-You can also view code-level documentation using:
+You can view code-level documentation using:
 
 ```bash
 cargo doc --open
